@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>نارمر | إدارة المبيعات والمخازن</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  body{font-family:'Tajawal',sans-serif;background:#faf7f2;color:#2b2320}
+  .gold{color:#b08d57}.bg-gold{background:#b08d57}.bg-ink{background:#2b2320}
+  .tab-active{color:#b08d57;border-top:3px solid #b08d57;background:#fff8ec}
+  input,select{font-family:inherit}
+  .card{background:#fff;border-radius:16px;box-shadow:0 2px 10px rgba(43,35,32,.08)}
+  .inp{width:100%;border:1px solid #e3d9c9;border-radius:12px;padding:10px 12px;background:#fff;font-size:16px}
+  .inp:focus{outline:2px solid #b08d57}
+  .btn{border-radius:12px;padding:10px 14px;font-weight:700;transition:.15s}
+  .btn:active{transform:scale(.97)}
+</style>
+</head>
+<body class="min-h-screen pb-24">
+<div id="app"></div>
+<div id="toast" class="fixed top-4 left-1/2 -translate-x-1/2 z-50 hidden px-5 py-3 rounded-xl text-white font-bold shadow-lg"></div>
+
+<script>
+/* ===== الإعدادات الأساسية ===== */
+// مفاتيح المواقع: المخزن الرئيسي + 8 فروع
+const BRANCHES = [
+  {key:'nasr', name:'مدينة نصر'}, {key:'maadi', name:'المعادي'}, {key:'faisal', name:'فيصل'},
+  {key:'alex', name:'الاسكندرية'}, {key:'mansoura', name:'المنصورة'}, {key:'tanta', name:'طنطا'},
+  {key:'zagazig', name:'الزقازيق'}, {key:'online', name:'الاونلاين'}
+];
+const LOCS = [{key:'main', name:'المخزن الرئيسي'}, ...BRANCHES];
+const locName = k => (LOCS.find(l => l.key === k) || {}).name || k;
+
+// حسابات الدخول (اسم المستخدم / كلمة المرور) - يمكنك تغييرها من هنا
+const DEFAULT_USERS = [{u:'admin', p:'admin123', role:'admin', name:'المدير'}]
+  .concat(BRANCHES.map(b => ({u:b.key, p:'1234', role:'branch', branch:b.key, name:'فرع ' + b.name})));
+
+const DB_KEY = 'narmar_db_v1', SESSION_KEY = 'narmar_session_v1';
+const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#efe6d6"/><text x="200" y="210" font-size="26" text-anchor="middle" fill="#b08d57" font-family="sans-serif">NARMAR</text></svg>');
+
+/* ===== حفظ وتحميل البيانات (LocalStorage) ===== */
+function seedData(){
+  // توزيع كميات عشوائي لكل مقاس في كل موقع
+  const mk = sizes => { const o = {}; LOCS.forEach(l => { o[l.key] = {}; sizes.forEach(s => o[l.key][s] = Math.floor(Math.random() * (l.key === 'main' ? 30 : 8))); }); return o; };
+  const p1 = {id:'p1', name:'فستان سهرة', sku:'NR-D101', price:1250, sizes:['S','M','L','XL'], img:'https://images.unsplash.com/photo-1595777457583-95e059d581b8?w=600'};
+  const p2 = {id:'p2', name:'عباية كلاسيك', sku:'NR-A202', price:950, sizes:['M','L','XL'], img:'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?w=600'};
+  return {products:[p1,p2], stock:{p1:mk(p1.sizes), p2:mk(p2.sizes)}, sales:[], users:JSON.parse(JSON.stringify(DEFAULT_USERS))};
+}
+function loadDB(){
+  try { const d = JSON.parse(localStorage.getItem(DB_KEY)); if (d && d.products) { if (!d.users) d.users = JSON.parse(JSON.stringify(DEFAULT_USERS)); return d; } } catch(e){}
+  const d = seedData(); saveDB(d); return d;
+}
+function saveDB(d){ try { localStorage.setItem(DB_KEY, JSON.stringify(d || db)); } catch(e){ toast('تعذر حفظ البيانات', true); } }
+let db = loadDB();
+let session = null;
+try { session = JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){}
+let tab = null;                // التبويب الحالي
+let ui = {loc:'main', date:today(), repBranch:'all', q:''};  // حالة الواجهة
+
+/* ===== دوال مساعدة ===== */
+function today(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => Number(n || 0).toLocaleString('ar-EG');
+const qtyOf = (pid, loc, size) => ((db.stock[pid] || {})[loc] || {})[size] || 0;
+const totalAt = (p, loc) => p.sizes.reduce((a, s) => a + qtyOf(p.id, loc, s), 0);
+function toast(msg, err){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl text-white font-bold shadow-lg ' + (err ? 'bg-red-600' : 'bg-green-700');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add('hidden'), 2500);
+}
+
+/* ===== واجهة الدخول ===== */
+function renderLogin(){
+  document.getElementById('app').innerHTML = `
+  <div class="min-h-screen flex items-center justify-center p-5">
+    <div class="card w-full max-w-sm p-7">
+      <div class="text-center mb-6">
+        <div class="text-4xl font-extrabold gold tracking-widest">NARMAR</div>
+        <div class="text-lg font-bold mt-1">نارمر للملابس</div>
+        <div class="text-sm text-gray-500 mt-1">نظام إدارة المبيعات والمخازن</div>
+      </div>
+      <label class="text-sm font-bold">اسم المستخدم</label>
+      <input id="lu" class="inp mt-1 mb-3" autocomplete="username" autocapitalize="none" dir="ltr">
+      <label class="text-sm font-bold">كلمة المرور</label>
+      <input id="lp" type="password" class="inp mt-1 mb-4" autocomplete="current-password" dir="ltr">
+      <button onclick="doLogin()" class="btn bg-ink text-white w-full text-lg">تسجيل الدخول</button>
+      <div class="mt-5 text-xs text-gray-500 bg-[#faf7f2] rounded-xl p-3 leading-6">
+        للتجربة: المدير <b dir="ltr">admin / admin123</b><br>
+        الفروع: <b dir="ltr">nasr, maadi, faisal, alex, mansoura, tanta, zagazig, online</b> وكلمة المرور <b dir="ltr">1234</b>
+      </div>
+    </div>
+  </div>`;
+  document.getElementById('lp').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+}
+function doLogin(){
+  const u = document.getElementById('lu').value.trim().toLowerCase(), p = document.getElementById('lp').value;
+  const user = db.users.find(x => x.u === u && x.p === p);
+  if (user && user.disabled) return toast('هذا الحساب موقوف', true);
+  if (!user) return toast('بيانات الدخول غير صحيحة', true);
+  session = user; try { localStorage.setItem(SESSION_KEY, JSON.stringify(user)); } catch(e){}
+  tab = null; renderApp();
+}
+function logout(){ session = null; try { localStorage.removeItem(SESSION_KEY); } catch(e){} renderLogin(); }
+
+/* ===== الهيكل العام + التبويبات ===== */
+function tabsFor(){
+  if (session.role === 'admin') return [{k:'products',t:'المنتجات',i:'👗'},{k:'inventory',t:'المخزون',i:'📦'},{k:'reports',t:'التقارير',i:'📊'},{k:'others',t:'الفروع',i:'🔎'},{k:'accounts',t:'الحسابات',i:'👤'}];
+  const all = [{k:'cashier',t:'الكاشير',i:'🛒'},{k:'others',t:'مخزون الفروع',i:'🔎'}];
+  // الصلاحيات: لو للحساب قائمة tabs يتم عرضها فقط
+  return session.tabs && session.tabs.length ? all.filter(t => session.tabs.includes(t.k)) : all;
+}
+function renderApp(){
+  const tabs = tabsFor();
+  if (!tab || !tabs.find(t => t.k === tab)) tab = tabs[0].k;
+  document.getElementById('app').innerHTML = `
+  <header class="bg-ink text-white px-4 py-3 flex items-center justify-between sticky top-0 z-40">
+    <div><span class="font-extrabold gold tracking-widest text-xl">NARMAR</span>
+      <span class="text-sm mr-2 opacity-80">${esc(session.name)}</span></div>
+    <button onclick="logout()" class="text-sm bg-white/10 rounded-lg px-3 py-1.5">خروج</button>
+  </header>
+  <main id="view" class="p-3 max-w-3xl mx-auto"></main>
+  <nav class="fixed bottom-0 inset-x-0 bg-white border-t flex z-40" style="padding-bottom:env(safe-area-inset-bottom,0px)">
+    ${tabs.map(t => `<button onclick="go('${t.k}')" class="flex-1 py-2 text-xs font-bold text-gray-500 ${t.k === tab ? 'tab-active' : ''}">
+      <div class="text-xl">${t.i}</div>${t.t}</button>`).join('')}
+  </nav>`;
+  renderView();
+}
+function go(k){ tab = k; ui.q = ''; renderApp(); window.scrollTo(0,0); }
+function renderView(){
+  ({products:vProducts, inventory:vInventory, reports:vReports, others:vOthers, cashier:vCashier, accounts:vAccounts})[tab]();
+}
+const view = () => document.getElementById('view');
+
+/* ===== شاشة المنتجات (Admin) ===== */
+function vProducts(){
+  view().innerHTML = `
+  <div class="card p-4 mb-4">
+    <h2 class="font-extrabold text-lg mb-3 gold">➕ إضافة منتج جديد</h2>
+    <div class="space-y-2">
+      <input id="pn" class="inp" placeholder="اسم قطعة الملابس">
+      <div class="grid grid-cols-2 gap-2">
+        <input id="ps" class="inp" placeholder="كود المنتج SKU" dir="ltr">
+        <input id="pp" class="inp" type="number" inputmode="decimal" placeholder="السعر (ج.م)">
+      </div>
+      <input id="pz" class="inp" placeholder="المقاسات مفصولة بفاصلة: S, M, L, XL" dir="ltr">
+      <input id="pi" class="inp" placeholder="رابط صورة المنتج (Image URL)" dir="ltr">
+      <button onclick="addProduct()" class="btn bg-gold text-white w-full">حفظ المنتج</button>
+    </div>
+  </div>
+  <h2 class="font-extrabold text-lg mb-2">كل المنتجات (${db.products.length})</h2>
+  <div class="space-y-3">${db.products.map(p => `
+    <div class="card p-3 flex gap-3">
+      <img src="${esc(p.img)}" onerror="this.src='${PLACEHOLDER}'" class="w-24 h-28 object-cover rounded-xl bg-gray-100">
+      <div class="flex-1 min-w-0">
+        <div class="font-bold">${esc(p.name)}</div>
+        <div class="text-sm text-gray-500" dir="ltr" style="text-align:right">${esc(p.sku)}</div>
+        <div class="font-extrabold gold">${fmt(p.price)} ج.م</div>
+        <div class="text-xs text-gray-500 mb-2">المقاسات: ${esc(p.sizes.join(' / '))} — بالمخزن: ${fmt(totalAt(p,'main'))} قطعة</div>
+        <div class="flex gap-2">
+          <button onclick="editProduct('${p.id}')" class="btn bg-ink text-white text-sm py-1.5">تعديل</button>
+          <button onclick="delProduct('${p.id}')" class="btn bg-red-100 text-red-700 text-sm py-1.5">حذف</button>
+        </div>
+      </div>
+    </div>`).join('') || '<div class="text-center text-gray-500 p-6">لا توجد منتجات</div>'}</div>`;
+}
+function parseSizes(s){ return [...new Set(s.split(/[,،\s]+/).map(x => x.trim().toUpperCase()).filter(Boolean))]; }
+function addProduct(){
+  const name = pn.value.trim(), sku = ps.value.trim().toUpperCase(), price = parseFloat(pp.value), sizes = parseSizes(pz.value), img = pi.value.trim();
+  if (!name || !sku || !(price >= 0) || !sizes.length) return toast('أكمل الاسم والكود والسعر والمقاسات', true);
+  if (db.products.some(p => p.sku === sku)) return toast('كود المنتج مستخدم من قبل', true);
+  const id = 'p' + Date.now();
+  db.products.push({id, name, sku, price, sizes, img});
+  db.stock[id] = {}; LOCS.forEach(l => { db.stock[id][l.key] = {}; sizes.forEach(s => db.stock[id][l.key][s] = 0); });
+  saveDB(); toast('تمت إضافة المنتج'); vProducts();
+}
+function editProduct(id){
+  const p = db.products.find(x => x.id === id);
+  const name = prompt('اسم المنتج:', p.name); if (name === null) return;
+  const price = prompt('السعر:', p.price); if (price === null) return;
+  const sizes = prompt('المقاسات (مفصولة بفاصلة):', p.sizes.join(', ')); if (sizes === null) return;
+  const img = prompt('رابط الصورة:', p.img); if (img === null) return;
+  const sz = parseSizes(sizes), pr = parseFloat(price);
+  if (!name.trim() || !(pr >= 0) || !sz.length) return toast('بيانات غير صحيحة', true);
+  // إضافة المقاسات الجديدة بكمية صفر في كل المواقع
+  LOCS.forEach(l => { db.stock[id][l.key] = db.stock[id][l.key] || {}; sz.forEach(s => { if (db.stock[id][l.key][s] == null) db.stock[id][l.key][s] = 0; }); });
+  Object.assign(p, {name:name.trim(), price:pr, sizes:sz, img:img.trim()});
+  saveDB(); toast('تم التعديل'); vProducts();
+}
+function delProduct(id){
+  if (!confirm('حذف المنتج نهائياً؟')) return;
+  db.products = db.products.filter(p => p.id !== id); delete db.stock[id];
+  saveDB(); vProducts();
+}
+
+/* ===== شاشة المخزون (Admin) - زيادة/تعديل الكميات ===== */
+function vInventory(){
+  view().innerHTML = `
+  <div class="card p-3 mb-3">
+    <label class="text-sm font-bold">اختر الموقع</label>
+    <select class="inp mt-1" onchange="ui.loc=this.value;vInventory()">
+      ${LOCS.map(l => `<option value="${l.key}" ${ui.loc === l.key ? 'selected' : ''}>${l.name}</option>`).join('')}
+    </select>
+  </div>
+  <div class="space-y-3">${db.products.map(p => `
+    <div class="card p-3">
+      <div class="flex gap-3 items-center mb-2">
+        <img src="${esc(p.img)}" onerror="this.src='${PLACEHOLDER}'" class="w-14 h-16 object-cover rounded-lg">
+        <div><div class="font-bold">${esc(p.name)}</div><div class="text-xs text-gray-500" dir="ltr">${esc(p.sku)}</div>
+        <div class="text-xs">الإجمالي: <b>${fmt(totalAt(p, ui.loc))}</b></div></div>
+      </div>
+      <div class="grid grid-cols-1 gap-2">${p.sizes.map(s => `
+        <div class="flex items-center justify-between bg-[#faf7f2] rounded-xl px-3 py-2">
+          <span class="font-bold w-12">${esc(s)}</span>
+          <div class="flex items-center gap-2">
+            <button onclick="adj('${p.id}','${s}',-1)" class="btn bg-white border w-10 h-10 p-0 text-xl">−</button>
+            <input type="number" inputmode="numeric" min="0" value="${qtyOf(p.id, ui.loc, s)}" onchange="setQty('${p.id}','${s}',this.value)" class="inp text-center font-bold" style="width:80px">
+            <button onclick="adj('${p.id}','${s}',1)" class="btn bg-gold text-white w-10 h-10 p-0 text-xl">+</button>
+          </div>
+        </div>`).join('')}</div>
+    </div>`).join('')}</div>`;
+}
+function adj(pid, s, d){ setQty(pid, s, Math.max(0, qtyOf(pid, ui.loc, s) + d)); }
+function setQty(pid, s, v){
+  v = Math.max(0, parseInt(v) || 0);
+  db.stock[pid] = db.stock[pid] || {}; db.stock[pid][ui.loc] = db.stock[pid][ui.loc] || {};
+  db.stock[pid][ui.loc][s] = v; saveDB(); vInventory();
+}
+
+/* ===== شاشة التقارير (Admin) ===== */
+function vReports(){
+  const day = db.sales.filter(s => s.date === ui.date);
+  const rows = BRANCHES.map(b => { const x = day.filter(s => s.branch === b.key); return {name:b.name, q:x.reduce((a,s)=>a+s.qty,0), t:x.reduce((a,s)=>a+s.total,0)}; });
+  const tq = rows.reduce((a,r)=>a+r.q,0), tt = rows.reduce((a,r)=>a+r.t,0);
+  // ملخص يوم بيوم (حسب الفرع المختار)
+  const filt = db.sales.filter(s => ui.repBranch === 'all' || s.branch === ui.repBranch);
+  const byDay = {}; filt.forEach(s => { byDay[s.date] = byDay[s.date] || {q:0,t:0}; byDay[s.date].q += s.qty; byDay[s.date].t += s.total; });
+  const days = Object.keys(byDay).sort().reverse();
+  view().innerHTML = `
+  <div class="card p-3 mb-3">
+    <label class="text-sm font-bold">تاريخ التقرير</label>
+    <input type="date" class="inp mt-1" value="${ui.date}" onchange="ui.date=this.value||today();vReports()">
+  </div>
+  <div class="grid grid-cols-2 gap-3 mb-3">
+    <div class="card p-3 text-center"><div class="text-xs text-gray-500">القطع المباعة</div><div class="text-2xl font-extrabold gold">${fmt(tq)}</div></div>
+    <div class="card p-3 text-center"><div class="text-xs text-gray-500">إجمالي المبيعات</div><div class="text-2xl font-extrabold gold">${fmt(tt)}</div></div>
+  </div>
+  <div class="card overflow-hidden mb-5">
+    <table class="w-full text-sm"><thead class="bg-ink text-white"><tr><th class="p-2 text-right">الفرع</th><th class="p-2">القطع</th><th class="p-2">المبلغ (ج.م)</th></tr></thead>
+    <tbody>${rows.map(r => `<tr class="border-b"><td class="p-2 font-bold">${r.name}</td><td class="p-2 text-center">${fmt(r.q)}</td><td class="p-2 text-center">${fmt(r.t)}</td></tr>`).join('')}</tbody></table>
+  </div>
+  <div class="card p-3">
+    <h3 class="font-extrabold mb-2">المبيعات يوم بيوم</h3>
+    <select class="inp mb-3" onchange="ui.repBranch=this.value;vReports()">
+      <option value="all">كل الفروع</option>
+      ${BRANCHES.map(b => `<option value="${b.key}" ${ui.repBranch === b.key ? 'selected' : ''}>${b.name}</option>`).join('')}
+    </select>
+    <table class="w-full text-sm"><thead class="bg-[#efe6d6]"><tr><th class="p-2 text-right">اليوم</th><th class="p-2">القطع</th><th class="p-2">المبلغ</th></tr></thead>
+    <tbody>${days.map(d => `<tr class="border-b"><td class="p-2" dir="ltr" style="text-align:right">${d}</td><td class="p-2 text-center">${fmt(byDay[d].q)}</td><td class="p-2 text-center">${fmt(byDay[d].t)}</td></tr>`).join('') || '<tr><td colspan="3" class="p-4 text-center text-gray-500">لا توجد مبيعات بعد</td></tr>'}</tbody></table>
+  </div>`;
+}
+
+/* ===== شاشة الكاشير (الفروع) ===== */
+function vCashier(){
+  const br = session.branch;
+  const mine = db.sales.filter(s => s.branch === br && s.date === today());
+  view().innerHTML = `
+  <div class="card p-3 mb-3 flex justify-between items-center">
+    <div><div class="font-extrabold">فرع ${locName(br)}</div><div class="text-xs text-gray-500">مبيعات اليوم</div></div>
+    <div class="text-left"><div class="font-extrabold gold text-lg">${fmt(mine.reduce((a,s)=>a+s.total,0))} ج.م</div>
+    <div class="text-xs text-gray-500">${fmt(mine.reduce((a,s)=>a+s.qty,0))} قطعة</div></div>
+  </div>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${db.products.map(p => `
+    <div class="card overflow-hidden" id="c_${p.id}">
+      <img src="${esc(p.img)}" onerror="this.src='${PLACEHOLDER}'" class="w-full h-64 object-cover bg-gray-100">
+      <div class="p-3">
+        <div class="flex justify-between items-start">
+          <div><div class="font-bold text-lg">${esc(p.name)}</div><div class="text-xs text-gray-500" dir="ltr" style="text-align:right">${esc(p.sku)}</div></div>
+          <div class="font-extrabold gold text-lg">${fmt(p.price)} ج.م</div>
+        </div>
+        <div class="text-sm my-2">المتاح بالفرع: <b id="av_${p.id}" class="text-green-700">${fmt(totalAt(p, br))}</b> قطعة</div>
+        <div class="grid grid-cols-2 gap-2 mb-2">
+          <select id="sz_${p.id}" class="inp" onchange="sizeChanged('${p.id}')">
+            ${p.sizes.map(s => `<option value="${esc(s)}">${esc(s)} (${qtyOf(p.id, br, s)})</option>`).join('')}
+          </select>
+          <input id="q_${p.id}" type="number" inputmode="numeric" min="1" value="1" class="inp text-center" placeholder="الكمية">
+        </div>
+        <button onclick="sell('${p.id}')" class="btn bg-ink text-white w-full">✔ تأكيد البيع</button>
+      </div>
+    </div>`).join('') || '<div class="text-center text-gray-500 p-6">لا توجد منتجات</div>'}</div>`;
+}
+function sizeChanged(pid){
+  const s = document.getElementById('sz_' + pid).value;
+  document.getElementById('av_' + pid).textContent = fmt(qtyOf(pid, session.branch, s)) + ' (مقاس ' + s + ')';
+}
+function sell(pid){
+  const p = db.products.find(x => x.id === pid), br = session.branch;
+  const size = document.getElementById('sz_' + pid).value, q = parseInt(document.getElementById('q_' + pid).value);
+  if (!(q > 0)) return toast('أدخل كمية صحيحة', true);
+  const av = qtyOf(pid, br, size);
+  if (q > av) return toast('الكمية المتاحة من هذا المقاس: ' + av, true);
+  db.stock[pid][br][size] = av - q;   // خصم فوري من مخزن الفرع
+  db.sales.push({id:Date.now(), date:today(), time:new Date().toLocaleTimeString('ar-EG'), branch:br, pid, name:p.name, sku:p.sku, size, qty:q, total:q * p.price});
+  saveDB(); toast('تم البيع: ' + p.name + ' (' + size + ') × ' + q); vCashier();
+}
+
+/* ===== شاشة مخزون الفروع (بحث بالكود) ===== */
+function vOthers(){
+  view().innerHTML = `
+  <div class="card p-3 mb-3">
+    <label class="text-sm font-bold">ابحث بكود الموديل (SKU) أو الاسم</label>
+    <input id="sq" class="inp mt-1" dir="ltr" placeholder="مثال: NR-D101" value="${esc(ui.q)}" oninput="ui.q=this.value;renderOthers()" autocomplete="off">
+  </div>
+  <div id="oth"></div>`;
+  renderOthers();
+}
+function renderOthers(){
+  const q = ui.q.trim().toLowerCase(), box = document.getElementById('oth');
+  if (!q) { box.innerHTML = '<div class="text-center text-gray-500 p-8">اكتب كود الموديل لعرض الكميات في كل الفروع 🔎</div>'; return; }
+  const list = db.products.filter(p => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q));
+  if (!list.length) { box.innerHTML = '<div class="text-center text-red-600 p-8">لا يوجد موديل بهذا الكود</div>'; return; }
+  box.innerHTML = list.map(p => `
+    <div class="card overflow-hidden mb-4">
+      <div class="p-3 flex gap-3 items-center bg-[#efe6d6]">
+        <img src="${esc(p.img)}" onerror="this.src='${PLACEHOLDER}'" class="w-14 h-16 object-cover rounded-lg">
+        <div><div class="font-bold">${esc(p.name)}</div><div class="text-xs" dir="ltr">${esc(p.sku)}</div></div>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead class="bg-ink text-white"><tr><th class="p-2 text-right">الفرع</th>${p.sizes.map(s => `<th class="p-2">${esc(s)}</th>`).join('')}<th class="p-2">الإجمالي</th></tr></thead>
+        <tbody>${LOCS.map(l => { const t = totalAt(p, l.key), me = session.role === 'branch' && session.branch === l.key;
+          return `<tr class="border-b ${me ? 'bg-amber-50' : ''}"><td class="p-2 font-bold">${l.name}${me ? ' (فرعك)' : ''}</td>
+          ${p.sizes.map(s => { const n = qtyOf(p.id, l.key, s); return `<td class="p-2 text-center ${n ? '' : 'text-red-500'}">${n}</td>`; }).join('')}
+          <td class="p-2 text-center font-extrabold ${t ? 'text-green-700' : 'text-red-600'}">${t}</td></tr>`; }).join('')}</tbody>
+      </table></div>
+    </div>`).join('');
+}
+
+/* ===== شاشة إدارة الحسابات والصلاحيات (Admin) ===== */
+const PERMS = [{k:'cashier', t:'تسجيل المبيعات (الكاشير)'}, {k:'others', t:'رؤية مخزون الفروع'}];
+function vAccounts(){
+  view().innerHTML = `
+  <div class="card p-4 mb-4">
+    <h2 class="font-extrabold text-lg mb-3 gold">➕ إضافة حساب فرع</h2>
+    <div class="space-y-2">
+      <input id="au" class="inp" dir="ltr" placeholder="اسم المستخدم (إنجليزي بدون مسافات)" autocapitalize="none">
+      <input id="ap" class="inp" dir="ltr" placeholder="كلمة المرور (4 أحرف على الأقل)">
+      <select id="ab" class="inp">${BRANCHES.map(b => `<option value="${b.key}">${b.name}</option>`).join('')}</select>
+      <button onclick="accAdd()" class="btn bg-gold text-white w-full">إضافة الحساب</button>
+    </div>
+  </div>
+  <div class="space-y-3">${db.users.map(u => `
+    <div class="card p-3 ${u.disabled ? 'opacity-60' : ''}">
+      <div class="flex justify-between items-start mb-2">
+        <div><div class="font-bold">${esc(u.name)} ${u.disabled ? '<span class="text-red-600 text-xs">(موقوف)</span>' : ''}</div>
+        <div class="text-xs text-gray-500" dir="ltr" style="text-align:right">${esc(u.u)} / ${esc(u.p)}</div></div>
+        <span class="text-xs bg-[#efe6d6] rounded-lg px-2 py-1">${u.role === 'admin' ? 'مدير' : locName(u.branch)}</span>
+      </div>
+      ${u.role === 'admin' ? '<div class="text-xs text-gray-500 mb-2">صلاحيات كاملة</div>' : `
+      <div class="space-y-1 mb-2">${PERMS.map(p => `
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" class="w-5 h-5" ${(!u.tabs || u.tabs.includes(p.k)) ? 'checked' : ''} onchange="accPerm('${u.u}')" data-u="${u.u}" data-k="${p.k}"> ${p.t}</label>`).join('')}
+      </div>`}
+      <div class="flex gap-2 flex-wrap">
+        <button onclick="accPass('${u.u}')" class="btn bg-ink text-white text-sm py-1.5">تغيير كلمة المرور</button>
+        ${u.role === 'admin' ? '' : `
+        <button onclick="accToggle('${u.u}')" class="btn bg-amber-100 text-amber-800 text-sm py-1.5">${u.disabled ? 'تفعيل' : 'إيقاف'}</button>
+        <button onclick="accDel('${u.u}')" class="btn bg-red-100 text-red-700 text-sm py-1.5">حذف</button>`}
+      </div>
+    </div>`).join('')}</div>`;
+}
+const getU = n => db.users.find(x => x.u === n);
+function accAdd(){
+  const u = au.value.trim().toLowerCase(), p = ap.value.trim(), b = ab.value;
+  if (!/^[a-z0-9_]+$/.test(u)) return toast('اسم المستخدم: حروف إنجليزية وأرقام فقط', true);
+  if (p.length < 4) return toast('كلمة المرور قصيرة', true);
+  if (getU(u)) return toast('اسم المستخدم موجود بالفعل', true);
+  db.users.push({u, p, role:'branch', branch:b, name:'فرع ' + locName(b) + ' (' + u + ')', tabs:['cashier','others']});
+  saveDB(); toast('تمت إضافة الحساب'); vAccounts();
+}
+function accPass(n){
+  const p = prompt('كلمة المرور الجديدة:'); if (p === null) return;
+  if (p.trim().length < 4) return toast('كلمة المرور قصيرة (4 أحرف على الأقل)', true);
+  getU(n).p = p.trim(); saveDB(); toast('تم تغيير كلمة المرور'); vAccounts();
+}
+function accPerm(n){
+  const tabs = [...document.querySelectorAll('input[data-u="' + n + '"]')].filter(c => c.checked).map(c => c.dataset.k);
+  if (!tabs.length) { toast('لازم صلاحية واحدة على الأقل', true); return vAccounts(); }
+  getU(n).tabs = tabs; saveDB(); toast('تم تحديث الصلاحيات');
+}
+function accToggle(n){ const u = getU(n); u.disabled = !u.disabled; saveDB(); vAccounts(); }
+function accDel(n){ if (!confirm('حذف الحساب نهائياً؟')) return; db.users = db.users.filter(x => x.u !== n); saveDB(); vAccounts(); }
+
+/* ===== تشغيل النظام ===== */
+const live = session && db.users.find(u => u.u === session.u && !u.disabled);
+if (live) { session = live; renderApp(); } else renderLogin();
+</script>
+</body>
+</html>
