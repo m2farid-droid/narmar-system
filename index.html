@@ -92,7 +92,7 @@ let db = {products:[], stock:{}, sales:[], users:[], branches:[]};
 let session = null;
 try { session = JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){}
 let tab = null;                // التبويب الحالي
-let ui = {loc:'main', date:today(), repBranch:'all', q:'', per:'today', from:today(), to:today()};  // حالة الواجهة
+let ui = {cq:'', bsel:null, loc:'main', date:today(), repBranch:'all', q:'', per:'today', from:today(), to:today()};  // حالة الواجهة
 
 /* ===== دوال مساعدة ===== */
 function today(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
@@ -138,7 +138,7 @@ function logout(){ session = null; try { localStorage.removeItem(SESSION_KEY); }
 
 /* ===== الهيكل العام + التبويبات ===== */
 function tabsFor(){
-  if (session.role === 'admin') return [{k:'products',t:'المنتجات',i:'👗'},{k:'inventory',t:'المخزون',i:'📦'},{k:'reports',t:'التقارير',i:'📊'},{k:'others',t:'الفروع',i:'🔎'},{k:'accounts',t:'الحسابات',i:'👤'}];
+  if (session.role === 'admin') return [{k:'products',t:'المنتجات',i:'👗'},{k:'inventory',t:'المخزون',i:'📦'},{k:'reports',t:'التقارير',i:'📊'},{k:'branches',t:'الفروع',i:'🏬'},{k:'others',t:'بحث',i:'🔎'},{k:'accounts',t:'الحسابات',i:'👤'}];
   const all = [{k:'cashier',t:'الكاشير',i:'🛒'},{k:'others',t:'مخزون الفروع',i:'🔎'}];
   // الصلاحيات: لو للحساب قائمة tabs يتم عرضها فقط
   const base = session.tabs && session.tabs.length ? all.filter(t => session.tabs.includes(t.k)) : all;
@@ -161,9 +161,9 @@ function renderApp(){
   </nav>`;
   renderView();
 }
-function go(k){ tab = k; ui.q = ''; renderApp(); window.scrollTo(0,0); }
+function go(k){ tab = k; ui.q = ''; ui.cq = ''; ui.bsel = null; renderApp(); window.scrollTo(0,0); }
 function renderView(){
-  ({products:vProducts, inventory:vInventory, reports:vReports, others:vOthers, cashier:vCashier, accounts:vAccounts, sales:vSales})[tab]();
+  ({products:vProducts, inventory:vInventory, reports:vReports, others:vOthers, cashier:vCashier, accounts:vAccounts, sales:vSales, branches:vBranches})[tab]();
 }
 const view = () => document.getElementById('view');
 
@@ -306,8 +306,19 @@ function repRange(){
   if (ui.per === 'custom') return ui.from <= ui.to ? [ui.from, ui.to] : [ui.to, ui.from];
   return [today(), today()];
 }
-const setPer = p => { ui.per = p; vReports(); };
+const setPer = p => { ui.per = p; renderView(); };
 const bar = (v, max, c) => `<div class="h-1.5 rounded bg-[#efe6d6] mt-1"><div class="h-1.5 rounded ${c || 'bg-gold'}" style="width:${Math.max(2, Math.round(v / max * 100))}%"></div></div>`;
+function periodBar(){
+  const [from, to] = repRange();
+  const chip = (k, t) => `<button onclick="setPer('${k}')" class="btn text-sm py-1.5 ${ui.per === k ? 'bg-ink text-white' : 'bg-white border'}">${t}</button>`;
+  return `<div class="card p-3 mb-3">
+    <div class="flex gap-2 flex-wrap">${chip('today','اليوم')}${chip('7','آخر 7 أيام')}${chip('month','هذا الشهر')}${chip('custom','فترة مخصصة')}</div>
+    ${ui.per === 'custom' ? `<div class="grid grid-cols-2 gap-2 mt-2">
+      <input type="date" class="inp" value="${ui.from}" onchange="ui.from=this.value||today();renderView()">
+      <input type="date" class="inp" value="${ui.to}" onchange="ui.to=this.value||today();renderView()"></div>` : ''}
+    <div class="text-xs text-gray-500 mt-2">الفترة: <span dir="ltr">${from}${from !== to ? ' → ' + to : ''}</span></div>
+  </div>`;
+}
 function vReports(){
   const [from, to] = repRange();
   if (ui.repBranch !== 'all' && !isLive(ui.repBranch)) ui.repBranch = 'all';
@@ -339,13 +350,7 @@ function vReports(){
   const chip = (k, t) => `<button onclick="setPer('${k}')" class="btn text-sm py-1.5 ${ui.per === k ? 'bg-ink text-white' : 'bg-white border'}">${t}</button>`;
   const kpi = (t, v, c) => `<div class="card p-3 text-center"><div class="text-xs text-gray-500">${t}</div><div class="text-xl font-extrabold ${c || 'gold'}">${v}</div></div>`;
   view().innerHTML = `
-  <div class="card p-3 mb-3">
-    <div class="flex gap-2 flex-wrap">${chip('today','اليوم')}${chip('7','آخر 7 أيام')}${chip('month','هذا الشهر')}${chip('custom','فترة مخصصة')}</div>
-    ${ui.per === 'custom' ? `<div class="grid grid-cols-2 gap-2 mt-2">
-      <input type="date" class="inp" value="${ui.from}" onchange="ui.from=this.value||today();vReports()">
-      <input type="date" class="inp" value="${ui.to}" onchange="ui.to=this.value||today();vReports()"></div>` : ''}
-    <div class="text-xs text-gray-500 mt-2">الفترة: <span dir="ltr">${from}${from !== to ? ' → ' + to : ''}</span></div>
-  </div>
+  ${periodBar()}
   <div class="grid grid-cols-2 gap-3 mb-3">
     ${kpi('صافي المبيعات (ج.م)', fmt(Math.round(totT)))}${kpi('القطع المباعة', fmt(totQ))}
     ${kpi('عدد الفواتير', fmt(nInv))}${kpi('متوسط الفاتورة (ج.م)', fmt(nInv ? Math.round(totT / nInv) : 0))}
@@ -390,6 +395,86 @@ function exportCSV(){
   document.body.appendChild(a); a.click(); a.remove();
 }
 
+/* ===== شاشة الفروع (Admin): بيانات وتحكم لكل فرع ===== */
+const sQ = l => l.reduce((a, s) => a + netQty(s), 0), sT = l => l.reduce((a, s) => a + netTotal(s), 0);
+const monthStart = () => { const t = new Date(); return dstr(new Date(t.getFullYear(), t.getMonth(), 1)); };
+const openBr = k => { ui.bsel = k; renderView(); window.scrollTo(0, 0); };
+const backBr = () => { ui.bsel = null; renderView(); };
+function vBranches(){
+  if (ui.bsel) return vBranchDetail(ui.bsel);
+  const [from, to] = repRange(), m0 = monthStart();
+  view().innerHTML = periodBar() + `<div class="space-y-3">${db.branches.slice().sort((a, b) => a.o - b.o).map(b => {
+    const l = db.sales.filter(s => s.branch === b.key && s.date >= from && s.date <= to);
+    const month = sT(db.sales.filter(s => s.branch === b.key && s.date >= m0));
+    let units = 0; db.products.forEach(p => units += totalAt(p, b.key));
+    return `<div class="card p-3 cursor-pointer ${b.active === false ? 'opacity-60' : ''}" onclick="openBr('${b.key}')">
+      <div class="flex justify-between items-center"><div class="font-extrabold">${esc(b.name)} <span class="text-xs ${b.active === false ? 'text-red-600' : 'text-green-700'}">${b.active === false ? '(مخفي)' : ''}</span></div><span class="text-gray-400">‹</span></div>
+      <div class="grid grid-cols-4 gap-1 text-center mt-2 text-xs">
+        <div><div class="font-extrabold gold">${fmt(Math.round(sT(l)))}</div>مبيعات</div><div><div class="font-extrabold">${fmt(sQ(l))}</div>قطعة</div>
+        <div><div class="font-extrabold">${fmt(l.filter(s => netQty(s) > 0).length)}</div>فاتورة</div><div><div class="font-extrabold">${fmt(units)}</div>مخزون</div>
+      </div>
+      ${b.target ? `<div class="text-xs text-gray-500 mt-2">هدف الشهر: ${fmt(Math.round(month))} / ${fmt(b.target)} (${Math.round(month / b.target * 100)}%)</div>${bar(Math.min(month, b.target), b.target)}` : ''}
+    </div>`; }).join('')}</div>`;
+}
+function vBranchDetail(key){
+  const b = db.branches.find(x => x.key === key); if (!b) { ui.bsel = null; return vBranches(); }
+  const [from, to] = repRange(), mine = db.sales.filter(s => s.branch === key);
+  const l = mine.filter(s => s.date >= from && s.date <= to), month = sT(mine.filter(s => s.date >= monthStart()));
+  const nInv = l.filter(s => netQty(s) > 0).length, tot = sT(l);
+  const pm = {}; l.forEach(s => { const m = pm[s.sku] = pm[s.sku] || {name:s.name, sku:s.sku, q:0, t:0}; m.q += netQty(s); m.t += netTotal(s); });
+  const top = Object.values(pm).filter(x => x.q > 0).sort((a, b) => b.q - a.q).slice(0, 5);
+  let units = 0; db.products.forEach(p => units += totalAt(p, key));
+  const users = db.users.filter(u => u.role === 'branch' && u.branch === key);
+  const kpi = (t, v, c) => `<div class="card p-3 text-center"><div class="text-xs text-gray-500">${t}</div><div class="text-xl font-extrabold ${c || 'gold'}">${v}</div></div>`;
+  const off = b.active === false;
+  view().innerHTML = `
+  <button onclick="backBr()" class="btn bg-white border text-sm py-1.5 mb-3">→ رجوع للفروع</button>
+  <div class="card p-3 mb-3 ${off ? 'opacity-70' : ''}">
+    <div class="font-extrabold text-lg">${esc(b.name)} <span class="text-xs ${off ? 'text-red-600' : 'text-green-700'}">${off ? '(مخفي)' : '(ظاهر)'}</span></div>
+    <div class="flex gap-2 flex-wrap mt-3">
+      <button onclick="brRename('${key}')" class="btn bg-ink text-white text-sm py-1.5">✏️ تغيير الاسم</button>
+      <button onclick="brTarget('${key}')" class="btn bg-ink text-white text-sm py-1.5">🎯 الهدف الشهري</button>
+      ${off ? '' : `<button onclick="ui.loc='${key}';go('inventory')" class="btn bg-ink text-white text-sm py-1.5">📦 تعديل المخزون</button>`}
+      <button onclick="brToggle('${key}')" class="btn text-sm py-1.5 ${off ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}">${off ? 'إظهار الفرع' : 'إخفاء الفرع'}</button>
+    </div>
+    ${b.target ? `<div class="text-xs text-gray-500 mt-3">هدف الشهر: ${fmt(Math.round(month))} / ${fmt(b.target)} ج.م (${Math.round(month / b.target * 100)}%)</div>${bar(Math.min(month, b.target), b.target)}` : ''}
+  </div>
+  ${periodBar()}
+  <div class="grid grid-cols-2 gap-3 mb-3">
+    ${kpi('صافي المبيعات (ج.م)', fmt(Math.round(tot)))}${kpi('القطع المباعة', fmt(sQ(l)))}
+    ${kpi('عدد الفواتير', fmt(nInv))}${kpi('متوسط الفاتورة', fmt(nInv ? Math.round(tot / nInv) : 0))}
+    ${kpi('مبيعات الشهر (ج.م)', fmt(Math.round(month)))}${kpi('مخزون الفرع (قطعة)', fmt(units))}
+  </div>
+  <div class="card p-3 mb-3"><h3 class="font-extrabold mb-2">📦 مخزون الفرع</h3>
+    ${db.products.map(p => `<div class="py-2 border-b"><div class="text-sm font-bold">${esc(p.name)} <span class="text-xs text-gray-500" dir="ltr">${esc(p.sku)}</span> <span class="text-xs">— ${fmt(totalAt(p, key))} قطعة</span></div>
+      <div class="flex gap-1 flex-wrap mt-1">${p.sizes.map(z => { const n = qtyOf(p.id, key, z); return `<span class="text-xs rounded-lg px-2 py-1 ${n ? 'bg-[#efe6d6]' : 'bg-red-100 text-red-700'}">${esc(z)}: ${n}</span>`; }).join('')}</div></div>`).join('') || '<div class="text-sm text-gray-500">لا توجد منتجات</div>'}
+  </div>
+  <div class="card p-3 mb-3"><h3 class="font-extrabold mb-2">🔥 الأكثر مبيعاً في الفرع</h3>
+    ${top.map((x, i) => `<div class="flex justify-between text-sm py-1 border-b"><span>${i + 1}. ${esc(x.name)}</span><span class="font-bold">${fmt(x.q)} قطعة — ${fmt(Math.round(x.t))} ج.م</span></div>`).join('') || '<div class="text-sm text-gray-500">لا توجد مبيعات في هذه الفترة</div>'}
+  </div>
+  <div class="card p-3 mb-3"><h3 class="font-extrabold mb-2">👤 حسابات الفرع</h3>
+    ${users.map(u => `<div class="py-2 border-b ${u.disabled ? 'opacity-60' : ''}">
+      <div class="flex justify-between text-sm"><b>${esc(u.name)}${u.disabled ? ' (موقوف)' : ''}</b><span dir="ltr" class="text-xs text-gray-500">${esc(u.u)} / ${esc(u.p)}</span></div>
+      ${[['cancel', 'إلغاء فاتورة البيع'], ['return', 'عمل مرتجع']].map(([k, t]) => `<label class="flex items-center gap-2 text-sm mt-1"><input type="checkbox" class="w-5 h-5" ${userCan(u, k) ? 'checked' : ''} onchange="accCan('${u.u}')" data-pu="${u.u}" data-pk="${k}"> ${t}</label>`).join('')}
+      <div class="flex gap-2 mt-2"><button onclick="accPass('${u.u}')" class="btn bg-ink text-white text-sm py-1.5">تغيير كلمة المرور</button>
+      <button onclick="accToggle('${u.u}')" class="btn bg-amber-100 text-amber-800 text-sm py-1.5">${u.disabled ? 'تفعيل' : 'إيقاف'}</button></div></div>`).join('') || '<div class="text-sm text-gray-500">لا توجد حسابات لهذا الفرع</div>'}
+  </div>
+  <h3 class="font-extrabold mb-2">🧾 فواتير الفرع في الفترة (${fmt(l.length)}) <span class="text-xs font-normal text-gray-500">اضغط على فاتورة للتفاصيل</span></h3>
+  <div class="space-y-3 mb-5">${salesRows(l.slice().sort((a, b) => b.id - a.id).slice(0, 50), false)}</div>`;
+}
+function brRename(k){
+  const b = db.branches.find(x => x.key === k), n = prompt('الاسم الجديد للفرع:', b.name); if (n === null) return;
+  if (!n.trim()) return toast('اكتب اسماً صحيحاً', true);
+  b.name = n.trim(); applyBranches(db.branches);
+  db.users.filter(u => u.role === 'branch' && u.branch === k).forEach(u => { u.name = 'فرع ' + b.name + (u.u === k ? '' : ' (' + u.u + ')'); sync(cloudSet('/users/' + u.u, u)); });
+  sync(cloudSet('/branches/' + k, b)); toast('تم تغيير الاسم'); renderView();
+}
+function brTarget(k){
+  const b = db.branches.find(x => x.key === k), t = prompt('الهدف الشهري للمبيعات بالجنيه (اكتب 0 للإلغاء):', b.target || ''); if (t === null) return;
+  const v = parseFloat(t); if (!(v >= 0)) return toast('رقم غير صحيح', true);
+  b.target = v; sync(cloudSet('/branches/' + k, b)); toast('تم حفظ الهدف'); renderView();
+}
+
 /* ===== شاشة الكاشير (الفروع) ===== */
 function vCashier(){
   const br = session.branch;
@@ -400,8 +485,15 @@ function vCashier(){
     <div class="text-left"><div class="font-extrabold gold text-lg">${fmt(mine.reduce((a,s)=>a+netTotal(s),0))} ج.م</div>
     <div class="text-xs text-gray-500">${fmt(mine.reduce((a,s)=>a+netQty(s),0))} قطعة</div></div>
   </div>
-  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${db.products.map(p => `
-    <div class="card overflow-hidden" id="c_${p.id}">
+  <div class="sticky z-30 pb-2 pt-1" style="top:58px;background:#faf7f2">
+    <div class="relative">
+      <input id="cs" class="inp pr-10" placeholder="🔎 ابحث بكود المنتج أو اسمه" value="${esc(ui.cq)}" oninput="cashFilter(this.value)" autocomplete="off">
+      <button onclick="document.getElementById('cs').value='';cashFilter('')" class="absolute left-3 top-2.5 text-gray-400 text-xl">×</button>
+    </div>
+  </div>
+  <div id="cnone" class="text-center text-gray-500 p-6 ${db.products.some(p => (p.name + ' ' + p.sku).toLowerCase().includes((ui.cq || '').trim().toLowerCase())) ? 'hidden' : ''}">لا يوجد منتج بهذا الكود أو الاسم</div>
+  <div id="cgrid" class="grid grid-cols-1 sm:grid-cols-2 gap-3">${db.products.map(p => `
+    <div class="card overflow-hidden" id="c_${p.id}" data-s="${esc((p.name + ' ' + p.sku).toLowerCase())}" style="${(p.name + ' ' + p.sku).toLowerCase().includes((ui.cq || '').trim().toLowerCase()) ? '' : 'display:none'}">
       <img src="${esc(p.img)}" onerror="this.src='${PLACEHOLDER}'" class="w-full h-64 object-cover bg-gray-100">
       <div class="p-3">
         <div class="flex justify-between items-start">
@@ -419,6 +511,11 @@ function vCashier(){
       </div>
     </div>`).join('') || '<div class="text-center text-gray-500 p-6">لا توجد منتجات</div>'}</div>`;
 }
+function cashFilter(v){
+  ui.cq = v; const q = v.trim().toLowerCase(); let n = 0;
+  document.querySelectorAll('#cgrid [data-s]').forEach(c => { const ok = !q || c.dataset.s.includes(q); c.style.display = ok ? '' : 'none'; if (ok) n++; });
+  document.getElementById('cnone').classList.toggle('hidden', n > 0);
+}
 function sizeChanged(pid){
   const s = document.getElementById('sz_' + pid).value;
   document.getElementById('av_' + pid).textContent = fmt(qtyOf(pid, session.branch, s)) + ' (مقاس ' + s + ')';
@@ -434,7 +531,7 @@ async function sell(pid){
     if (q > cur) { toast('الكمية المتاحة من هذا المقاس: ' + cur, true); await refreshData(true); return; }
     const left = await fb('PUT', path, {'.sv': {increment: -q}});   // خصم ذري
     if (typeof left === 'number' && left < 0) { await fb('PUT', path, {'.sv': {increment: q}}); toast('نفدت الكمية، حاول مرة أخرى', true); await refreshData(true); return; }
-    const sale = {id:Date.now(), date:today(), time:new Date().toLocaleTimeString('ar-EG'), branch:br, pid, name:p.name, sku:p.sku, size, qty:q, total:q * p.price};
+    const sale = {id:Date.now(), date:today(), time:new Date().toLocaleTimeString('ar-EG'), branch:br, pid, name:p.name, sku:p.sku, size, qty:q, price:p.price, by:session.u, total:q * p.price};
     await cloudSet('/sales/s' + sale.id, sale);
     db.stock[pid] = db.stock[pid] || {}; db.stock[pid][br] = db.stock[pid][br] || {};
     db.stock[pid][br][size] = typeof left === 'number' ? left : cur - q;
@@ -456,13 +553,41 @@ function salesRows(list, showBranch){
   return list.slice().sort((a, b) => b.id - a.id).map(s => {
     const st = s.cancelled ? '<div class="text-red-600 text-xs font-bold">ملغاة</div>' : (s.retQty ? `<div class="text-amber-700 text-xs font-bold">مرتجع ${s.retQty}</div>` : '');
     const act = !s.cancelled && netQty(s) > 0 && canAct(s) ? `<div class="flex gap-2 mt-2">
-      ${can('return') ? `<button onclick="returnSale('${s.id}')" class="btn bg-amber-100 text-amber-800 text-sm py-1.5">↩ مرتجع</button>` : ''}
-      ${can('cancel') ? `<button onclick="cancelSale('${s.id}')" class="btn bg-red-100 text-red-700 text-sm py-1.5">✖ إلغاء الفاتورة</button>` : ''}</div>` : '';
-    return `<div class="card p-3 ${s.cancelled ? 'opacity-60' : ''}">
+      ${can('return') ? `<button onclick="event.stopPropagation();returnSale('${s.id}')" class="btn bg-amber-100 text-amber-800 text-sm py-1.5">↩ مرتجع</button>` : ''}
+      ${can('cancel') ? `<button onclick="event.stopPropagation();cancelSale('${s.id}')" class="btn bg-red-100 text-red-700 text-sm py-1.5">✖ إلغاء الفاتورة</button>` : ''}</div>` : '';
+    return `<div class="card p-3 cursor-pointer ${s.cancelled ? 'opacity-60' : ''}" onclick="showInvoice('${s.id}')">
       <div class="flex justify-between gap-2"><div><div class="font-bold">${esc(s.name)} <span class="text-xs text-gray-500" dir="ltr">${esc(s.sku)}</span></div>
       <div class="text-xs text-gray-500">مقاس ${esc(s.size)} × ${s.qty} — ${esc(s.time || '')}${showBranch ? ' — ' + locName(s.branch) : ''}</div></div>
       <div class="text-left"><div class="font-extrabold gold">${fmt(netTotal(s))} ج.م</div>${st}</div></div>${act}</div>`;
   }).join('');
+}
+function closeInv(){ const e = document.getElementById('inv'); if (e) e.remove(); }
+function showInvoice(id){
+  const s = db.sales.find(x => String(x.id) === String(id)); if (!s) return;
+  const p = db.products.find(x => x.id === s.pid), unit = s.price || s.total / s.qty, ret = s.retQty || 0;
+  const who = n => { const u = db.users.find(x => x.u === n); return n ? esc(u ? u.name : n) : '—'; };
+  const row = (k, v, c) => `<div class="flex justify-between py-2 border-b text-sm"><span class="text-gray-500">${k}</span><span class="font-bold ${c || ''}">${v}</span></div>`;
+  const st = s.cancelled ? '<span class="text-red-600">ملغاة</span>' : (ret ? '<span class="text-amber-700">بها مرتجع</span>' : '<span class="text-green-700">مكتملة</span>');
+  const canDo = !s.cancelled && netQty(s) > 0 && canAct(s);
+  closeInv();
+  const d = document.createElement('div'); d.id = 'inv'; d.className = 'fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center';
+  d.onclick = e => { if (e.target === d) closeInv(); };
+  d.innerHTML = `<div class="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-4 overflow-y-auto" style="max-height:88vh;padding-bottom:calc(1rem + env(safe-area-inset-bottom,0px))">
+    <div class="flex justify-between items-center mb-3"><div class="font-extrabold text-lg">🧾 فاتورة #${String(s.id).slice(-6)}</div><button onclick="closeInv()" class="text-3xl text-gray-400 leading-none">×</button></div>
+    <div class="flex gap-3 items-center mb-2">
+      <img src="${esc(p ? p.img : '')}" onerror="this.src='${PLACEHOLDER}'" class="w-20 h-24 object-cover rounded-xl bg-gray-100">
+      <div><div class="font-bold text-lg">${esc(s.name)}</div><div class="text-xs text-gray-500" dir="ltr">${esc(s.sku)}</div></div>
+    </div>
+    ${row('الحالة', st)}${row('التاريخ والوقت', esc(s.date) + ' — ' + esc(s.time || ''))}${row('الفرع', locName(s.branch))}${row('الكاشير', who(s.by))}
+    ${row('المقاس', esc(s.size))}${row('سعر القطعة', fmt(unit) + ' ج.م')}${row('الكمية المباعة', fmt(s.qty))}${row('إجمالي الفاتورة', fmt(s.total) + ' ج.م')}
+    ${ret ? row('المرتجع', fmt(ret) + ' قطعة = ' + fmt(Math.round(ret * unit)) + ' ج.م', 'text-amber-700') + row('بواسطة', who(s.retBy)) : ''}
+    ${s.cancelled ? row('أُلغيت بواسطة', who(s.cancelBy), 'text-red-600') + row('وقت الإلغاء', esc(s.cancelAt || '—')) : ''}
+    ${row('الصافي', fmt(Math.round(netTotal(s))) + ' ج.م (' + fmt(netQty(s)) + ' قطعة)', 'gold')}
+    ${canDo ? `<div class="flex gap-2 mt-3">
+      ${can('return') ? `<button onclick="closeInv();returnSale('${s.id}')" class="btn bg-amber-100 text-amber-800 flex-1">↩ مرتجع</button>` : ''}
+      ${can('cancel') ? `<button onclick="closeInv();cancelSale('${s.id}')" class="btn bg-red-100 text-red-700 flex-1">✖ إلغاء الفاتورة</button>` : ''}</div>` : ''}
+  </div>`;
+  document.body.appendChild(d);
 }
 function vSales(){
   const list = db.sales.filter(s => s.branch === session.branch && s.date === today());
@@ -590,7 +715,7 @@ function brToggle(k){
   const b = db.branches.find(x => x.key === k); if (!b) return;
   if (b.active !== false && !confirm('إخفاء فرع ' + b.name + ' من التقارير والبحث وإيقاف دخول موظفيه؟')) return;
   b.active = b.active === false;
-  sync(cloudSet('/branches/' + k, b)); applyBranches(db.branches); toast(b.active ? 'تم إظهار الفرع' : 'تم إخفاء الفرع'); vAccounts();
+  sync(cloudSet('/branches/' + k, b)); applyBranches(db.branches); toast(b.active ? 'تم إظهار الفرع' : 'تم إخفاء الفرع'); renderView();
 }
 function brAdd(){
   const name = bn.value.trim(), key = bk.value.trim().toLowerCase(), pw = bp.value.trim();
@@ -631,14 +756,14 @@ function accAdd(){
 function accPass(n){
   const p = prompt('كلمة المرور الجديدة:'); if (p === null) return;
   if (p.trim().length < 4) return toast('كلمة المرور قصيرة (4 أحرف على الأقل)', true);
-  getU(n).p = p.trim(); sync(cloudSet('/users/' + n, getU(n))); toast('تم تغيير كلمة المرور'); vAccounts();
+  getU(n).p = p.trim(); sync(cloudSet('/users/' + n, getU(n))); toast('تم تغيير كلمة المرور'); renderView();
 }
 function accPerm(n){
   const tabs = [...document.querySelectorAll('input[data-u="' + n + '"]')].filter(c => c.checked).map(c => c.dataset.k);
   if (!tabs.length) { toast('لازم صلاحية واحدة على الأقل', true); return vAccounts(); }
   getU(n).tabs = tabs; sync(cloudSet('/users/' + n, getU(n))); toast('تم تحديث الصلاحيات');
 }
-function accToggle(n){ const u = getU(n); u.disabled = !u.disabled; sync(cloudSet('/users/' + n, u)); vAccounts(); }
+function accToggle(n){ const u = getU(n); u.disabled = !u.disabled; sync(cloudSet('/users/' + n, u)); renderView(); }
 function accDel(n){ if (!confirm('حذف الحساب نهائياً؟')) return; db.users = db.users.filter(x => x.u !== n); sync(cloudDel('/users/' + n)); vAccounts(); }
 
 /* ===== تشغيل النظام ===== */
