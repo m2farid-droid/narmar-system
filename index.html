@@ -48,12 +48,34 @@ function seedData(){
   const p2 = {id:'p2', name:'عباية كلاسيك', sku:'NR-A202', price:950, sizes:['M','L','XL'], img:'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?w=600'};
   return {products:[p1,p2], stock:{p1:mk(p1.sizes), p2:mk(p2.sizes)}, sales:[], users:JSON.parse(JSON.stringify(DEFAULT_USERS))};
 }
-function loadDB(){
-  try { const d = JSON.parse(localStorage.getItem(DB_KEY)); if (d && d.products) { if (!d.users) d.users = JSON.parse(JSON.stringify(DEFAULT_USERS)); return d; } } catch(e){}
-  const d = seedData(); saveDB(d); return d;
+/* ===== التخزين السحابي (Firebase Realtime Database عبر REST) ===== */
+const FB = 'https://narmar-egy-default-rtdb.firebaseio.com/narmar';
+async function fb(method, path, body){
+  const r = await fetch(FB + path + '.json', {method, headers:{'Content-Type':'application/json'}, body: body === undefined ? undefined : JSON.stringify(body)});
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
 }
-function saveDB(d){ try { localStorage.setItem(DB_KEY, JSON.stringify(d || db)); } catch(e){ toast('تعذر حفظ البيانات', true); } }
-let db = loadDB();
+const cloudSet = (p, v) => fb('PUT', p, v);
+const cloudDel = p => fb('DELETE', p);
+// تحويل بين شكل البيانات في الذاكرة وشكلها في السحابة
+function toCloud(d){
+  const c = {products:{}, stock:d.stock || {}, sales:{}, users:{}};
+  d.products.forEach(p => c.products[p.id] = p);
+  (d.sales || []).forEach(x => c.sales['s' + x.id] = x);
+  (d.users || []).forEach(u => c.users[u.u] = u);
+  return c;
+}
+function fromCloud(c){
+  return {products:Object.values(c.products || {}), stock:c.stock || {}, sales:Object.values(c.sales || {}), users:Object.values(c.users || {})};
+}
+async function loadDB(){
+  let c = await fb('GET', '');
+  if (!c || !c.products) { c = toCloud(seedData()); await fb('PUT', '', c); }   // أول تشغيل: بيانات تجريبية
+  if (!c.users) { c.users = toCloud({products:[], users:DEFAULT_USERS}).users; await cloudSet('/users', c.users); }
+  return fromCloud(c);
+}
+function sync(promise){ promise.catch(() => toast('تعذر الحفظ على السحابة - تأكد من الإنترنت', true)); return promise; }
+let db = {products:[], stock:{}, sales:[], users:[]};
 let session = null;
 try { session = JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){}
 let tab = null;                // التبويب الحالي
@@ -118,7 +140,7 @@ function renderApp(){
   <header class="bg-ink text-white px-4 py-3 flex items-center justify-between sticky top-0 z-40">
     <div><span class="font-extrabold gold tracking-widest text-xl">NARMAR</span>
       <span class="text-sm mr-2 opacity-80">${esc(session.name)}</span></div>
-    <button onclick="logout()" class="text-sm bg-white/10 rounded-lg px-3 py-1.5">خروج</button>
+    <div class="flex gap-2"><button onclick="refreshData(true)" class="text-sm bg-white/10 rounded-lg px-3 py-1.5">🔄 تحديث</button><button onclick="logout()" class="text-sm bg-white/10 rounded-lg px-3 py-1.5">خروج</button></div>
   </header>
   <main id="view" class="p-3 max-w-3xl mx-auto"></main>
   <nav class="fixed bottom-0 inset-x-0 bg-white border-t flex z-40" style="padding-bottom:env(safe-area-inset-bottom,0px)">
@@ -165,7 +187,7 @@ function vProducts(){
       </div>
     </div>`).join('') || '<div class="text-center text-gray-500 p-6">لا توجد منتجات</div>'}</div>`;
 }
-function parseSizes(s){ return [...new Set(s.split(/[,،\s]+/).map(x => x.trim().toUpperCase()).filter(Boolean))]; }
+function parseSizes(s){ return [...new Set(s.split(/[,،\s]+/).map(x => x.trim().toUpperCase().replace(/[.#$\/\[\]]/g, '')).filter(Boolean))]; }
 function addProduct(){
   const name = pn.value.trim(), sku = ps.value.trim().toUpperCase(), price = parseFloat(pp.value), sizes = parseSizes(pz.value), img = pi.value.trim();
   if (!name || !sku || !(price >= 0) || !sizes.length) return toast('أكمل الاسم والكود والسعر والمقاسات', true);
@@ -173,7 +195,7 @@ function addProduct(){
   const id = 'p' + Date.now();
   db.products.push({id, name, sku, price, sizes, img});
   db.stock[id] = {}; LOCS.forEach(l => { db.stock[id][l.key] = {}; sizes.forEach(s => db.stock[id][l.key][s] = 0); });
-  saveDB(); toast('تمت إضافة المنتج'); vProducts();
+  sync(Promise.all([cloudSet('/products/' + id, db.products[db.products.length - 1]), cloudSet('/stock/' + id, db.stock[id])])); toast('تمت إضافة المنتج'); vProducts();
 }
 function editProduct(id){
   const p = db.products.find(x => x.id === id);
@@ -183,15 +205,16 @@ function editProduct(id){
   const img = prompt('رابط الصورة:', p.img); if (img === null) return;
   const sz = parseSizes(sizes), pr = parseFloat(price);
   if (!name.trim() || !(pr >= 0) || !sz.length) return toast('بيانات غير صحيحة', true);
+  db.stock[id] = db.stock[id] || {};
   // إضافة المقاسات الجديدة بكمية صفر في كل المواقع
   LOCS.forEach(l => { db.stock[id][l.key] = db.stock[id][l.key] || {}; sz.forEach(s => { if (db.stock[id][l.key][s] == null) db.stock[id][l.key][s] = 0; }); });
   Object.assign(p, {name:name.trim(), price:pr, sizes:sz, img:img.trim()});
-  saveDB(); toast('تم التعديل'); vProducts();
+  sync(Promise.all([cloudSet('/products/' + id, p), cloudSet('/stock/' + id, db.stock[id])])); toast('تم التعديل'); vProducts();
 }
 function delProduct(id){
   if (!confirm('حذف المنتج نهائياً؟')) return;
   db.products = db.products.filter(p => p.id !== id); delete db.stock[id];
-  saveDB(); vProducts();
+  sync(Promise.all([cloudDel('/products/' + id), cloudDel('/stock/' + id)])); vProducts();
 }
 
 /* ===== شاشة المخزون (Admin) - زيادة/تعديل الكميات ===== */
@@ -225,7 +248,7 @@ function adj(pid, s, d){ setQty(pid, s, Math.max(0, qtyOf(pid, ui.loc, s) + d));
 function setQty(pid, s, v){
   v = Math.max(0, parseInt(v) || 0);
   db.stock[pid] = db.stock[pid] || {}; db.stock[pid][ui.loc] = db.stock[pid][ui.loc] || {};
-  db.stock[pid][ui.loc][s] = v; saveDB(); vInventory();
+  db.stock[pid][ui.loc][s] = v; sync(cloudSet('/stock/' + pid + '/' + ui.loc + '/' + encodeURIComponent(s), v)); vInventory();
 }
 
 /* ===== شاشة التقارير (Admin) ===== */
@@ -294,15 +317,24 @@ function sizeChanged(pid){
   const s = document.getElementById('sz_' + pid).value;
   document.getElementById('av_' + pid).textContent = fmt(qtyOf(pid, session.branch, s)) + ' (مقاس ' + s + ')';
 }
-function sell(pid){
+async function sell(pid){
   const p = db.products.find(x => x.id === pid), br = session.branch;
   const size = document.getElementById('sz_' + pid).value, q = parseInt(document.getElementById('q_' + pid).value);
   if (!(q > 0)) return toast('أدخل كمية صحيحة', true);
-  const av = qtyOf(pid, br, size);
-  if (q > av) return toast('الكمية المتاحة من هذا المقاس: ' + av, true);
-  db.stock[pid][br][size] = av - q;   // خصم فوري من مخزن الفرع
-  db.sales.push({id:Date.now(), date:today(), time:new Date().toLocaleTimeString('ar-EG'), branch:br, pid, name:p.name, sku:p.sku, size, qty:q, total:q * p.price});
-  saveDB(); toast('تم البيع: ' + p.name + ' (' + size + ') × ' + q); vCashier();
+  const btn = window.event && window.event.target; if (btn) btn.disabled = true;
+  try {
+    const path = '/stock/' + pid + '/' + br + '/' + encodeURIComponent(size);
+    const cur = (await fb('GET', path)) || 0;                       // الكمية الحالية الفعلية من السحابة
+    if (q > cur) { toast('الكمية المتاحة من هذا المقاس: ' + cur, true); await refreshData(true); return; }
+    const left = await fb('PUT', path, {'.sv': {increment: -q}});   // خصم ذري
+    if (typeof left === 'number' && left < 0) { await fb('PUT', path, {'.sv': {increment: q}}); toast('نفدت الكمية، حاول مرة أخرى', true); await refreshData(true); return; }
+    const sale = {id:Date.now(), date:today(), time:new Date().toLocaleTimeString('ar-EG'), branch:br, pid, name:p.name, sku:p.sku, size, qty:q, total:q * p.price};
+    await cloudSet('/sales/s' + sale.id, sale);
+    db.stock[pid] = db.stock[pid] || {}; db.stock[pid][br] = db.stock[pid][br] || {};
+    db.stock[pid][br][size] = typeof left === 'number' ? left : cur - q;
+    db.sales.push(sale);
+    toast('تم البيع: ' + p.name + ' (' + size + ') × ' + q); vCashier();
+  } catch(e){ toast('تعذر تسجيل البيع، تأكد من الإنترنت', true); if (btn) btn.disabled = false; }
 }
 
 /* ===== شاشة مخزون الفروع (بحث بالكود) ===== */
@@ -340,6 +372,11 @@ function renderOthers(){
 const PERMS = [{k:'cashier', t:'تسجيل المبيعات (الكاشير)'}, {k:'others', t:'رؤية مخزون الفروع'}];
 function vAccounts(){
   view().innerHTML = `
+  <div class="card p-4 mb-4 border border-amber-300">
+    <h2 class="font-extrabold mb-1">☁️ نقل بيانات هذا الجهاز للسحابة</h2>
+    <p class="text-xs text-gray-500 mb-2">لو أدخلت منتجات على هذا الجهاز قبل الربط، اضغط مرة واحدة لرفعها (يستبدل بيانات السحابة).</p>
+    <button onclick="migrateLocal()" class="btn bg-ink text-white w-full text-sm">رفع بيانات هذا الجهاز</button>
+  </div>
   <div class="card p-4 mb-4">
     <h2 class="font-extrabold text-lg mb-3 gold">➕ إضافة حساب فرع</h2>
     <div class="space-y-2">
@@ -369,30 +406,61 @@ function vAccounts(){
     </div>`).join('')}</div>`;
 }
 const getU = n => db.users.find(x => x.u === n);
+async function migrateLocal(){
+  let d = null; try { d = JSON.parse(localStorage.getItem(DB_KEY)); } catch(e){}
+  if (!d || !d.products || !d.products.length) return toast('لا توجد بيانات قديمة على هذا الجهاز', true);
+  if (!confirm('سيتم استبدال كل بيانات السحابة ببيانات هذا الجهاز. متأكد؟')) return;
+  try {
+    const c = toCloud(d);
+    if (!Object.keys(c.users).length) c.users = toCloud({products:[], users:DEFAULT_USERS}).users;
+    await fb('PUT', '', c); db = fromCloud(c);
+    session = db.users.find(u => u.u === session.u) || session;
+    toast('تم رفع البيانات للسحابة'); vAccounts();
+  } catch(e){ toast('فشل الرفع', true); }
+}
 function accAdd(){
   const u = au.value.trim().toLowerCase(), p = ap.value.trim(), b = ab.value;
   if (!/^[a-z0-9_]+$/.test(u)) return toast('اسم المستخدم: حروف إنجليزية وأرقام فقط', true);
   if (p.length < 4) return toast('كلمة المرور قصيرة', true);
   if (getU(u)) return toast('اسم المستخدم موجود بالفعل', true);
   db.users.push({u, p, role:'branch', branch:b, name:'فرع ' + locName(b) + ' (' + u + ')', tabs:['cashier','others']});
-  saveDB(); toast('تمت إضافة الحساب'); vAccounts();
+  sync(cloudSet('/users/' + u, db.users[db.users.length - 1])); toast('تمت إضافة الحساب'); vAccounts();
 }
 function accPass(n){
   const p = prompt('كلمة المرور الجديدة:'); if (p === null) return;
   if (p.trim().length < 4) return toast('كلمة المرور قصيرة (4 أحرف على الأقل)', true);
-  getU(n).p = p.trim(); saveDB(); toast('تم تغيير كلمة المرور'); vAccounts();
+  getU(n).p = p.trim(); sync(cloudSet('/users/' + n, getU(n))); toast('تم تغيير كلمة المرور'); vAccounts();
 }
 function accPerm(n){
   const tabs = [...document.querySelectorAll('input[data-u="' + n + '"]')].filter(c => c.checked).map(c => c.dataset.k);
   if (!tabs.length) { toast('لازم صلاحية واحدة على الأقل', true); return vAccounts(); }
-  getU(n).tabs = tabs; saveDB(); toast('تم تحديث الصلاحيات');
+  getU(n).tabs = tabs; sync(cloudSet('/users/' + n, getU(n))); toast('تم تحديث الصلاحيات');
 }
-function accToggle(n){ const u = getU(n); u.disabled = !u.disabled; saveDB(); vAccounts(); }
-function accDel(n){ if (!confirm('حذف الحساب نهائياً؟')) return; db.users = db.users.filter(x => x.u !== n); saveDB(); vAccounts(); }
+function accToggle(n){ const u = getU(n); u.disabled = !u.disabled; sync(cloudSet('/users/' + n, u)); vAccounts(); }
+function accDel(n){ if (!confirm('حذف الحساب نهائياً؟')) return; db.users = db.users.filter(x => x.u !== n); sync(cloudDel('/users/' + n)); vAccounts(); }
 
 /* ===== تشغيل النظام ===== */
-const live = session && db.users.find(u => u.u === session.u && !u.disabled);
-if (live) { session = live; renderApp(); } else renderLogin();
+async function refreshData(manual){
+  try {
+    const nd = await loadDB();
+    if (JSON.stringify(nd) === JSON.stringify(db)) { if (manual === true) toast('البيانات محدثة'); return; }
+    db = nd;
+    if (session) { const l = db.users.find(u => u.u === session.u && !u.disabled); if (!l) return logout(); session = l; }
+    const a = document.activeElement, typing = a && /INPUT|SELECT|TEXTAREA/.test(a.tagName);
+    if (session && (manual === true || (!typing && !['cashier','accounts','products'].includes(tab)))) renderApp();
+  } catch(e){ if (manual === true) toast('تعذر التحديث', true); }
+}
+async function boot(){
+  document.getElementById('app').innerHTML = '<div class="min-h-screen flex items-center justify-center font-bold gold text-xl">جاري تحميل البيانات...</div>';
+  try { db = await loadDB(); } catch(e){
+    document.getElementById('app').innerHTML = '<div class="p-8 text-center"><div class="text-red-600 font-bold mb-3">تعذر الاتصال بقاعدة البيانات</div><button onclick="boot()" class="btn bg-ink text-white">إعادة المحاولة</button></div>';
+    return;
+  }
+  const live = session && db.users.find(u => u.u === session.u && !u.disabled);
+  if (live) { session = live; renderApp(); } else renderLogin();
+  if (!boot.t) boot.t = setInterval(refreshData, 15000);   // تحديث تلقائي كل 15 ثانية
+}
+boot();
 </script>
 </body>
 </html>
