@@ -70,7 +70,9 @@ function fromCloud(c){
 }
 async function loadDB(){
   let c = await fb('GET', '');
-  if (!c || !c.products) { c = toCloud(seedData()); await fb('PUT', '', c); }   // أول تشغيل: بيانات تجريبية
+  // البيانات التجريبية تُضاف مرة واحدة فقط (أول تشغيل)، وبعدها لا تعود حتى لو حُذفت كل المنتجات
+  if (!c || (!c.products && !(c.meta && c.meta.seeded))) { c = toCloud(seedData()); c.meta = {seeded:true}; await fb('PUT', '', c); }
+  else if (!c.meta) { c.meta = {seeded:true}; await cloudSet('/meta', c.meta); }
   if (!c.users) { c.users = toCloud({products:[], users:DEFAULT_USERS}).users; await cloudSet('/users', c.users); }
   return fromCloud(c);
 }
@@ -413,7 +415,7 @@ async function migrateLocal(){
   try {
     const c = toCloud(d);
     if (!Object.keys(c.users).length) c.users = toCloud({products:[], users:DEFAULT_USERS}).users;
-    await fb('PUT', '', c); db = fromCloud(c);
+    c.meta = {seeded:true}; await fb('PUT', '', c); db = fromCloud(c);
     session = db.users.find(u => u.u === session.u) || session;
     toast('تم رفع البيانات للسحابة'); vAccounts();
   } catch(e){ toast('فشل الرفع', true); }
