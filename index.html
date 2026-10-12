@@ -81,7 +81,7 @@ let db = {products:[], stock:{}, sales:[], users:[]};
 let session = null;
 try { session = JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){}
 let tab = null;                // التبويب الحالي
-let ui = {loc:'main', date:today(), repBranch:'all', q:''};  // حالة الواجهة
+let ui = {loc:'main', date:today(), repBranch:'all', q:'', per:'today', from:today(), to:today()};  // حالة الواجهة
 
 /* ===== دوال مساعدة ===== */
 function today(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
@@ -110,10 +110,6 @@ function renderLogin(){
       <label class="text-sm font-bold">كلمة المرور</label>
       <input id="lp" type="password" class="inp mt-1 mb-4" autocomplete="current-password" dir="ltr">
       <button onclick="doLogin()" class="btn bg-ink text-white w-full text-lg">تسجيل الدخول</button>
-      <div class="mt-5 text-xs text-gray-500 bg-[#faf7f2] rounded-xl p-3 leading-6">
-        للتجربة: المدير <b dir="ltr">admin / admin123</b><br>
-        الفروع: <b dir="ltr">nasr, maadi, faisal, alex, mansoura, tanta, zagazig, online</b> وكلمة المرور <b dir="ltr">1234</b>
-      </div>
     </div>
   </div>`;
   document.getElementById('lp').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
@@ -133,7 +129,9 @@ function tabsFor(){
   if (session.role === 'admin') return [{k:'products',t:'المنتجات',i:'👗'},{k:'inventory',t:'المخزون',i:'📦'},{k:'reports',t:'التقارير',i:'📊'},{k:'others',t:'الفروع',i:'🔎'},{k:'accounts',t:'الحسابات',i:'👤'}];
   const all = [{k:'cashier',t:'الكاشير',i:'🛒'},{k:'others',t:'مخزون الفروع',i:'🔎'}];
   // الصلاحيات: لو للحساب قائمة tabs يتم عرضها فقط
-  return session.tabs && session.tabs.length ? all.filter(t => session.tabs.includes(t.k)) : all;
+  const base = session.tabs && session.tabs.length ? all.filter(t => session.tabs.includes(t.k)) : all;
+  if (can('cancel') || can('return')) base.push({k:'sales',t:'الفواتير',i:'🧾'});   // يظهر فقط لمن لديه صلاحية
+  return base;
 }
 function renderApp(){
   const tabs = tabsFor();
@@ -153,7 +151,7 @@ function renderApp(){
 }
 function go(k){ tab = k; ui.q = ''; renderApp(); window.scrollTo(0,0); }
 function renderView(){
-  ({products:vProducts, inventory:vInventory, reports:vReports, others:vOthers, cashier:vCashier, accounts:vAccounts})[tab]();
+  ({products:vProducts, inventory:vInventory, reports:vReports, others:vOthers, cashier:vCashier, accounts:vAccounts, sales:vSales})[tab]();
 }
 const view = () => document.getElementById('view');
 
@@ -220,8 +218,19 @@ function delProduct(id){
 }
 
 /* ===== شاشة المخزون (Admin) - زيادة/تعديل الكميات ===== */
-function vInventory(){
+function vInventoryBase(){
   view().innerHTML = `
+  <div class="card p-3 mb-3">
+    <h3 class="font-extrabold mb-2">🔁 تحويل مخزون بين المواقع</h3>
+    <select id="tp" class="inp mb-2" onchange="tfSizes()">${db.products.map(p => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select>
+    <select id="tz" class="inp mb-2"></select>
+    <div class="grid grid-cols-2 gap-2 mb-2">
+      <select id="tf" class="inp">${LOCS.map(l => `<option value="${l.key}">من: ${l.name}</option>`).join('')}</select>
+      <select id="tt" class="inp">${LOCS.map((l, i) => `<option value="${l.key}" ${i === 1 ? 'selected' : ''}>إلى: ${l.name}</option>`).join('')}</select>
+    </div>
+    <input id="tq" type="number" inputmode="numeric" min="1" value="1" class="inp mb-2" placeholder="الكمية">
+    <button onclick="doTransfer()" class="btn bg-ink text-white w-full">تنفيذ التحويل</button>
+  </div>
   <div class="card p-3 mb-3">
     <label class="text-sm font-bold">اختر الموقع</label>
     <select class="inp mt-1" onchange="ui.loc=this.value;vInventory()">
@@ -246,6 +255,29 @@ function vInventory(){
         </div>`).join('')}</div>
     </div>`).join('')}</div>`;
 }
+function vInventory(){ vInventoryBase(); tfSizes(); }
+function tfSizes(){
+  const p = db.products.find(x => x.id === (document.getElementById('tp') || {}).value), z = document.getElementById('tz');
+  if (z) z.innerHTML = p ? p.sizes.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('') : '';
+}
+async function doTransfer(){
+  const pid = tp.value, size = tz.value, from = tf.value, to = tt.value, q = parseInt(tq.value);
+  if (!pid || !size) return toast('اختر المنتج والمقاس', true);
+  if (from === to) return toast('اختر موقعين مختلفين', true);
+  if (!(q > 0)) return toast('أدخل كمية صحيحة', true);
+  const path = l => '/stock/' + pid + '/' + l + '/' + encodeURIComponent(size);
+  try {
+    const cur = (await fb('GET', path(from))) || 0;
+    if (q > cur) return toast('المتاح في ' + locName(from) + ': ' + cur, true);
+    const left = await fb('PUT', path(from), {'.sv': {increment: -q}});
+    if (typeof left === 'number' && left < 0) { await fb('PUT', path(from), {'.sv': {increment: q}}); return toast('نفدت الكمية، حاول مرة أخرى', true); }
+    const right = await fb('PUT', path(to), {'.sv': {increment: q}});
+    db.stock[pid] = db.stock[pid] || {}; db.stock[pid][from] = db.stock[pid][from] || {}; db.stock[pid][to] = db.stock[pid][to] || {};
+    db.stock[pid][from][size] = typeof left === 'number' ? left : cur - q;
+    db.stock[pid][to][size] = typeof right === 'number' ? right : (db.stock[pid][to][size] || 0) + q;
+    toast('تم تحويل ' + q + ' قطعة من ' + locName(from) + ' إلى ' + locName(to)); vInventory();
+  } catch(e){ toast('تعذر التحويل، تأكد من الإنترنت', true); }
+}
 function adj(pid, s, d){ setQty(pid, s, Math.max(0, qtyOf(pid, ui.loc, s) + d)); }
 function setQty(pid, s, v){
   v = Math.max(0, parseInt(v) || 0);
@@ -254,36 +286,95 @@ function setQty(pid, s, v){
 }
 
 /* ===== شاشة التقارير (Admin) ===== */
+function dstr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function repRange(){
+  const t = new Date();
+  if (ui.per === '7') { const f = new Date(); f.setDate(t.getDate() - 6); return [dstr(f), dstr(t)]; }
+  if (ui.per === 'month') return [dstr(new Date(t.getFullYear(), t.getMonth(), 1)), dstr(t)];
+  if (ui.per === 'custom') return ui.from <= ui.to ? [ui.from, ui.to] : [ui.to, ui.from];
+  return [today(), today()];
+}
+const setPer = p => { ui.per = p; vReports(); };
+const bar = (v, max, c) => `<div class="h-1.5 rounded bg-[#efe6d6] mt-1"><div class="h-1.5 rounded ${c || 'bg-gold'}" style="width:${Math.max(2, Math.round(v / max * 100))}%"></div></div>`;
 function vReports(){
-  const day = db.sales.filter(s => s.date === ui.date);
-  const rows = BRANCHES.map(b => { const x = day.filter(s => s.branch === b.key); return {name:b.name, q:x.reduce((a,s)=>a+s.qty,0), t:x.reduce((a,s)=>a+s.total,0)}; });
-  const tq = rows.reduce((a,r)=>a+r.q,0), tt = rows.reduce((a,r)=>a+r.t,0);
-  // ملخص يوم بيوم (حسب الفرع المختار)
-  const filt = db.sales.filter(s => ui.repBranch === 'all' || s.branch === ui.repBranch);
-  const byDay = {}; filt.forEach(s => { byDay[s.date] = byDay[s.date] || {q:0,t:0}; byDay[s.date].q += s.qty; byDay[s.date].t += s.total; });
-  const days = Object.keys(byDay).sort().reverse();
+  const [from, to] = repRange();
+  const all = db.sales.filter(s => s.date >= from && s.date <= to);
+  const sumQ = l => l.reduce((a, s) => a + netQty(s), 0), sumT = l => l.reduce((a, s) => a + netTotal(s), 0);
+  const totQ = sumQ(all), totT = sumT(all), nInv = all.filter(s => netQty(s) > 0).length;
+  const retVal = all.reduce((a, s) => a + (s.cancelled ? s.total : (s.retQty || 0) * (s.total / s.qty)), 0);
+  const nCancel = all.filter(s => s.cancelled).length, nRet = all.filter(s => s.retQty).length;
+  // أداء الفروع (مرتب من الأعلى)
+  const rows = BRANCHES.map(b => { const x = all.filter(s => s.branch === b.key); return {name:b.name, inv:x.filter(s => netQty(s) > 0).length, q:sumQ(x), t:sumT(x)}; }).sort((a, b) => b.t - a.t);
+  const maxT = Math.max(1, ...rows.map(r => r.t));
+  // أفضل المنتجات والمقاسات
+  const pm = {}; all.forEach(s => { const m = pm[s.sku] = pm[s.sku] || {name:s.name, sku:s.sku, q:0, t:0}; m.q += netQty(s); m.t += netTotal(s); });
+  const top = Object.values(pm).filter(x => x.q > 0).sort((a, b) => b.q - a.q).slice(0, 5);
+  const sm = {}; all.forEach(s => { sm[s.size] = (sm[s.size] || 0) + netQty(s); });
+  const sizes = Object.entries(sm).filter(e => e[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  // قيمة المخزون الحالي بسعر البيع
+  let units = 0, value = 0; db.products.forEach(p => LOCS.forEach(l => { const n = totalAt(p, l.key); units += n; value += n * p.price; }));
+  // تنبيهات النقص: المخزن الرئيسي 5 أو أقل، والفرع 1 أو أقل لصنف مطلوب في الفترة
+  const sold = new Set(all.map(s => s.pid + '|' + s.size)), alerts = [];
+  db.products.forEach(p => p.sizes.forEach(z => {
+    const m = qtyOf(p.id, 'main', z); if (m <= 5) alerts.push({p, z, loc:'main', n:m});
+    BRANCHES.forEach(b => { const n = qtyOf(p.id, b.key, z); if (n <= 1 && sold.has(p.id + '|' + z)) alerts.push({p, z, loc:b.key, n}); });
+  }));
+  alerts.sort((a, b) => a.n - b.n);
+  // المبيعات يوم بيوم (آخر 30 يوم) حسب الفرع
+  const byDay = {}; db.sales.filter(s => ui.repBranch === 'all' || s.branch === ui.repBranch).forEach(s => { const d = byDay[s.date] = byDay[s.date] || {q:0, t:0}; d.q += netQty(s); d.t += netTotal(s); });
+  const days = Object.keys(byDay).sort().reverse().slice(0, 30), maxD = Math.max(1, ...days.map(d => byDay[d].t));
+  const chip = (k, t) => `<button onclick="setPer('${k}')" class="btn text-sm py-1.5 ${ui.per === k ? 'bg-ink text-white' : 'bg-white border'}">${t}</button>`;
+  const kpi = (t, v, c) => `<div class="card p-3 text-center"><div class="text-xs text-gray-500">${t}</div><div class="text-xl font-extrabold ${c || 'gold'}">${v}</div></div>`;
   view().innerHTML = `
   <div class="card p-3 mb-3">
-    <label class="text-sm font-bold">تاريخ التقرير</label>
-    <input type="date" class="inp mt-1" value="${ui.date}" onchange="ui.date=this.value||today();vReports()">
+    <div class="flex gap-2 flex-wrap">${chip('today','اليوم')}${chip('7','آخر 7 أيام')}${chip('month','هذا الشهر')}${chip('custom','فترة مخصصة')}</div>
+    ${ui.per === 'custom' ? `<div class="grid grid-cols-2 gap-2 mt-2">
+      <input type="date" class="inp" value="${ui.from}" onchange="ui.from=this.value||today();vReports()">
+      <input type="date" class="inp" value="${ui.to}" onchange="ui.to=this.value||today();vReports()"></div>` : ''}
+    <div class="text-xs text-gray-500 mt-2">الفترة: <span dir="ltr">${from}${from !== to ? ' → ' + to : ''}</span></div>
   </div>
   <div class="grid grid-cols-2 gap-3 mb-3">
-    <div class="card p-3 text-center"><div class="text-xs text-gray-500">القطع المباعة</div><div class="text-2xl font-extrabold gold">${fmt(tq)}</div></div>
-    <div class="card p-3 text-center"><div class="text-xs text-gray-500">إجمالي المبيعات</div><div class="text-2xl font-extrabold gold">${fmt(tt)}</div></div>
+    ${kpi('صافي المبيعات (ج.م)', fmt(Math.round(totT)))}${kpi('القطع المباعة', fmt(totQ))}
+    ${kpi('عدد الفواتير', fmt(nInv))}${kpi('متوسط الفاتورة (ج.م)', fmt(nInv ? Math.round(totT / nInv) : 0))}
+    ${kpi('قيمة المرتجع والملغي', fmt(Math.round(retVal)), 'text-red-600')}${kpi('ملغاة / بها مرتجع', fmt(nCancel) + ' / ' + fmt(nRet), 'text-red-600')}
   </div>
-  <div class="card overflow-hidden mb-5">
-    <table class="w-full text-sm"><thead class="bg-ink text-white"><tr><th class="p-2 text-right">الفرع</th><th class="p-2">القطع</th><th class="p-2">المبلغ (ج.م)</th></tr></thead>
-    <tbody>${rows.map(r => `<tr class="border-b"><td class="p-2 font-bold">${r.name}</td><td class="p-2 text-center">${fmt(r.q)}</td><td class="p-2 text-center">${fmt(r.t)}</td></tr>`).join('')}</tbody></table>
+  <div class="card p-3 mb-3">
+    <h3 class="font-extrabold mb-2">🏆 أداء الفروع</h3>
+    ${rows.map((r, i) => `<div class="mb-3"><div class="flex justify-between text-sm"><span class="font-bold">${i + 1}. ${r.name}</span><span>${fmt(Math.round(r.t))} ج.م <span class="text-xs text-gray-500">(${fmt(r.q)} قطعة / ${fmt(r.inv)} فاتورة)</span></span></div>${bar(r.t, maxT)}</div>`).join('')}
   </div>
-  <div class="card p-3">
-    <h3 class="font-extrabold mb-2">المبيعات يوم بيوم</h3>
+  <div class="card p-3 mb-3">
+    <h3 class="font-extrabold mb-2">🔥 الأكثر مبيعاً</h3>
+    ${top.map((x, i) => `<div class="flex justify-between text-sm py-1 border-b"><span>${i + 1}. ${esc(x.name)} <span class="text-xs text-gray-500" dir="ltr">${esc(x.sku)}</span></span><span class="font-bold">${fmt(x.q)} قطعة — ${fmt(Math.round(x.t))} ج.م</span></div>`).join('') || '<div class="text-sm text-gray-500">لا توجد مبيعات في هذه الفترة</div>'}
+    ${sizes.length ? `<div class="text-sm mt-3"><b>المقاسات الأكثر طلباً:</b> ${sizes.map(e => esc(e[0]) + ' (' + e[1] + ')').join(' • ')}</div>` : ''}
+  </div>
+  <div class="card p-3 mb-3">
+    <h3 class="font-extrabold mb-1">⚠️ تنبيهات النقص</h3>
+    <div class="text-xs text-gray-500 mb-2">المخزن الرئيسي (5 قطع أو أقل) + أصناف مطلوبة نفدت من الفروع</div>
+    ${alerts.slice(0, 20).map(a => `<div class="flex justify-between text-sm py-1 border-b"><span>${esc(a.p.name)} — ${esc(a.z)} <span class="text-xs text-gray-500">(${locName(a.loc)})</span></span><span class="font-bold ${a.n === 0 ? 'text-red-600' : 'text-amber-700'}">${a.n === 0 ? 'نفد' : 'متبقي ' + a.n}</span></div>`).join('') || '<div class="text-sm text-green-700">لا توجد تنبيهات 👌</div>'}
+    <div class="text-sm mt-3 bg-[#faf7f2] rounded-xl p-2">إجمالي المخزون: <b>${fmt(units)}</b> قطعة — بقيمة بيع <b>${fmt(Math.round(value))}</b> ج.م</div>
+  </div>
+  <div class="card p-3 mb-3">
+    <div class="flex justify-between items-center mb-2"><h3 class="font-extrabold">📅 المبيعات يوم بيوم</h3></div>
     <select class="inp mb-3" onchange="ui.repBranch=this.value;vReports()">
       <option value="all">كل الفروع</option>
       ${BRANCHES.map(b => `<option value="${b.key}" ${ui.repBranch === b.key ? 'selected' : ''}>${b.name}</option>`).join('')}
     </select>
-    <table class="w-full text-sm"><thead class="bg-[#efe6d6]"><tr><th class="p-2 text-right">اليوم</th><th class="p-2">القطع</th><th class="p-2">المبلغ</th></tr></thead>
-    <tbody>${days.map(d => `<tr class="border-b"><td class="p-2" dir="ltr" style="text-align:right">${d}</td><td class="p-2 text-center">${fmt(byDay[d].q)}</td><td class="p-2 text-center">${fmt(byDay[d].t)}</td></tr>`).join('') || '<tr><td colspan="3" class="p-4 text-center text-gray-500">لا توجد مبيعات بعد</td></tr>'}</tbody></table>
-  </div>`;
+    ${days.map(d => `<div class="mb-2"><div class="flex justify-between text-sm"><span dir="ltr">${d}</span><span>${fmt(byDay[d].q)} قطعة — <b>${fmt(Math.round(byDay[d].t))} ج.م</b></span></div>${bar(byDay[d].t, maxD, 'bg-ink')}</div>`).join('') || '<div class="text-sm text-gray-500">لا توجد مبيعات بعد</div>'}
+  </div>
+  <div class="flex justify-between items-center mb-2"><h3 class="font-extrabold">🧾 فواتير الفترة (${fmt(all.length)})</h3>
+    <button onclick="exportCSV()" class="btn bg-gold text-white text-sm py-1.5">⬇ تصدير Excel</button></div>
+  <div class="space-y-3 mb-5">${salesRows(all.slice().sort((a, b) => b.id - a.id).slice(0, 50), true)}</div>
+  ${all.length > 50 ? '<div class="text-xs text-gray-500 text-center mb-5">يعرض آخر 50 فاتورة، والتصدير يشمل الكل</div>' : ''}`;
+}
+// تصدير فواتير الفترة إلى ملف CSV يفتح في Excel
+function exportCSV(){
+  const [from, to] = repRange(), list = db.sales.filter(s => s.date >= from && s.date <= to).sort((a, b) => a.id - b.id);
+  const head = ['التاريخ','الوقت','الفرع','المنتج','الكود','المقاس','الكمية','المرتجع','الحالة','الصافي (ج.م)'];
+  const lines = [head].concat(list.map(s => [s.date, s.time || '', locName(s.branch), s.name, s.sku, s.size, s.qty, s.retQty || 0, s.cancelled ? 'ملغاة' : 'مكتملة', Math.round(netTotal(s))]));
+  const csv = '\ufeff' + lines.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'})); a.download = 'narmar-sales-' + from + '_' + to + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 /* ===== شاشة الكاشير (الفروع) ===== */
@@ -293,8 +384,8 @@ function vCashier(){
   view().innerHTML = `
   <div class="card p-3 mb-3 flex justify-between items-center">
     <div><div class="font-extrabold">فرع ${locName(br)}</div><div class="text-xs text-gray-500">مبيعات اليوم</div></div>
-    <div class="text-left"><div class="font-extrabold gold text-lg">${fmt(mine.reduce((a,s)=>a+s.total,0))} ج.م</div>
-    <div class="text-xs text-gray-500">${fmt(mine.reduce((a,s)=>a+s.qty,0))} قطعة</div></div>
+    <div class="text-left"><div class="font-extrabold gold text-lg">${fmt(mine.reduce((a,s)=>a+netTotal(s),0))} ج.م</div>
+    <div class="text-xs text-gray-500">${fmt(mine.reduce((a,s)=>a+netQty(s),0))} قطعة</div></div>
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${db.products.map(p => `
     <div class="card overflow-hidden" id="c_${p.id}">
@@ -337,6 +428,59 @@ async function sell(pid){
     db.sales.push(sale);
     toast('تم البيع: ' + p.name + ' (' + size + ') × ' + q); vCashier();
   } catch(e){ toast('تعذر تسجيل البيع، تأكد من الإنترنت', true); if (btn) btn.disabled = false; }
+}
+
+/* ===== الفواتير: الإلغاء والمرتجع (بصلاحيات) ===== */
+// الحساب بدون perms: المدير مسموح له، والفروع مغلق عليهم افتراضياً
+const userCan = (u, k) => u.perms ? !!u.perms[k] : u.role === 'admin';
+const can = k => userCan(session, k);
+const netQty = s => s.cancelled ? 0 : s.qty - (s.retQty || 0);
+const netTotal = s => netQty(s) * (s.total / s.qty);
+// الفرع يتعامل مع فواتير فرعه في نفس اليوم فقط، والمدير مع الكل
+const canAct = s => session.role === 'admin' || (s.branch === session.branch && s.date === today());
+function salesRows(list, showBranch){
+  if (!list.length) return '<div class="text-center text-gray-500 p-6">لا توجد فواتير</div>';
+  return list.slice().sort((a, b) => b.id - a.id).map(s => {
+    const st = s.cancelled ? '<div class="text-red-600 text-xs font-bold">ملغاة</div>' : (s.retQty ? `<div class="text-amber-700 text-xs font-bold">مرتجع ${s.retQty}</div>` : '');
+    const act = !s.cancelled && netQty(s) > 0 && canAct(s) ? `<div class="flex gap-2 mt-2">
+      ${can('return') ? `<button onclick="returnSale('${s.id}')" class="btn bg-amber-100 text-amber-800 text-sm py-1.5">↩ مرتجع</button>` : ''}
+      ${can('cancel') ? `<button onclick="cancelSale('${s.id}')" class="btn bg-red-100 text-red-700 text-sm py-1.5">✖ إلغاء الفاتورة</button>` : ''}</div>` : '';
+    return `<div class="card p-3 ${s.cancelled ? 'opacity-60' : ''}">
+      <div class="flex justify-between gap-2"><div><div class="font-bold">${esc(s.name)} <span class="text-xs text-gray-500" dir="ltr">${esc(s.sku)}</span></div>
+      <div class="text-xs text-gray-500">مقاس ${esc(s.size)} × ${s.qty} — ${esc(s.time || '')}${showBranch ? ' — ' + locName(s.branch) : ''}</div></div>
+      <div class="text-left"><div class="font-extrabold gold">${fmt(netTotal(s))} ج.م</div>${st}</div></div>${act}</div>`;
+  }).join('');
+}
+function vSales(){
+  const list = db.sales.filter(s => s.branch === session.branch && s.date === today());
+  view().innerHTML = `<div class="card p-3 mb-3 font-extrabold">🧾 فواتير اليوم — فرع ${locName(session.branch)}</div><div class="space-y-3">${salesRows(list, false)}</div>`;
+}
+// إرجاع كمية للمخزن بشكل ذري على السحابة
+async function restoreStock(s, n){
+  const v = await fb('PUT', '/stock/' + s.pid + '/' + s.branch + '/' + encodeURIComponent(s.size), {'.sv': {increment: n}});
+  db.stock[s.pid] = db.stock[s.pid] || {}; db.stock[s.pid][s.branch] = db.stock[s.pid][s.branch] || {};
+  db.stock[s.pid][s.branch][s.size] = typeof v === 'number' ? v : (db.stock[s.pid][s.branch][s.size] || 0) + n;
+}
+async function cancelSale(id){
+  const s = db.sales.find(x => String(x.id) === String(id));
+  if (!s || !can('cancel') || !canAct(s)) return toast('غير مسموح لك بإلغاء الفاتورة', true);
+  if (!confirm('إلغاء الفاتورة وإرجاع ' + netQty(s) + ' قطعة للمخزون؟')) return;
+  try {
+    await restoreStock(s, netQty(s));
+    s.cancelled = true; s.cancelBy = session.u; s.cancelAt = new Date().toLocaleString('ar-EG');
+    await cloudSet('/sales/s' + s.id, s); toast('تم إلغاء الفاتورة وإرجاع الكمية'); renderView();
+  } catch(e){ toast('تعذر إلغاء الفاتورة، تأكد من الإنترنت', true); }
+}
+async function returnSale(id){
+  const s = db.sales.find(x => String(x.id) === String(id));
+  if (!s || !can('return') || !canAct(s)) return toast('غير مسموح لك بعمل مرتجع', true);
+  const max = netQty(s), q = parseInt(prompt('كمية المرتجع (من 1 إلى ' + max + '):', '1'));
+  if (!(q >= 1 && q <= max)) return toast('كمية غير صحيحة', true);
+  try {
+    await restoreStock(s, q);
+    s.retQty = (s.retQty || 0) + q; s.retBy = session.u;
+    await cloudSet('/sales/s' + s.id, s); toast('تم المرتجع وإرجاع ' + q + ' للمخزون'); renderView();
+  } catch(e){ toast('تعذر تسجيل المرتجع، تأكد من الإنترنت', true); }
 }
 
 /* ===== شاشة مخزون الفروع (بحث بالكود) ===== */
@@ -399,6 +543,10 @@ function vAccounts(){
       <div class="space-y-1 mb-2">${PERMS.map(p => `
         <label class="flex items-center gap-2 text-sm"><input type="checkbox" class="w-5 h-5" ${(!u.tabs || u.tabs.includes(p.k)) ? 'checked' : ''} onchange="accPerm('${u.u}')" data-u="${u.u}" data-k="${p.k}"> ${p.t}</label>`).join('')}
       </div>`}
+      <div class="border-t pt-2 mb-2 space-y-1">
+        ${[['cancel','إلغاء فاتورة البيع'],['return','عمل مرتجع']].map(([k,t]) => `
+        <label class="flex items-center gap-2 text-sm"><input type="checkbox" class="w-5 h-5" ${userCan(u,k) ? 'checked' : ''} onchange="accCan('${u.u}')" data-pu="${u.u}" data-pk="${k}"> ${t}</label>`).join('')}
+      </div>
       <div class="flex gap-2 flex-wrap">
         <button onclick="accPass('${u.u}')" class="btn bg-ink text-white text-sm py-1.5">تغيير كلمة المرور</button>
         ${u.role === 'admin' ? '' : `
@@ -419,6 +567,11 @@ async function migrateLocal(){
     session = db.users.find(u => u.u === session.u) || session;
     toast('تم رفع البيانات للسحابة'); vAccounts();
   } catch(e){ toast('فشل الرفع', true); }
+}
+function accCan(n){
+  const u = getU(n); u.perms = {cancel:false, return:false};
+  document.querySelectorAll('input[data-pu="' + n + '"]').forEach(c => u.perms[c.dataset.pk] = c.checked);
+  sync(cloudSet('/users/' + n, u)); toast('تم تحديث الصلاحيات');
 }
 function accAdd(){
   const u = au.value.trim().toLowerCase(), p = ap.value.trim(), b = ab.value;
