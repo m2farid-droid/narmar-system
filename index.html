@@ -31,7 +31,16 @@ const BRANCHES = [
   {key:'zagazig', name:'الزقازيق'}, {key:'online', name:'الاونلاين'}
 ];
 const LOCS = [{key:'main', name:'المخزن الرئيسي'}, ...BRANCHES];
-const locName = k => (LOCS.find(l => l.key === k) || {}).name || k;
+// BRANCHES و LOCS قوائم "حية" تحتوي الفروع المفعّلة فقط، وتتحدث من السحابة عبر applyBranches
+const DEFAULT_BRANCHES = BRANCHES.map((b, i) => ({key:b.key, name:b.name, active:true, o:i}));
+function applyBranches(list){
+  const act = (list || []).filter(b => b.active !== false).sort((a, b) => a.o - b.o).map(b => ({key:b.key, name:b.name}));
+  BRANCHES.length = 0; BRANCHES.push(...act);
+  LOCS.length = 0; LOCS.push({key:'main', name:'المخزن الرئيسي'}, ...act);
+}
+const isLive = k => BRANCHES.some(b => b.key === k);
+const userOk = u => !u.disabled && (u.role === 'admin' || isLive(u.branch));
+const locName = k => (LOCS.find(l => l.key === k) || (typeof db !== 'undefined' && db.branches || []).find(b => b.key === k) || {}).name || k;
 
 // حسابات الدخول (اسم المستخدم / كلمة المرور) - يمكنك تغييرها من هنا
 const DEFAULT_USERS = [{u:'admin', p:'admin123', role:'admin', name:'المدير'}]
@@ -59,14 +68,15 @@ const cloudSet = (p, v) => fb('PUT', p, v);
 const cloudDel = p => fb('DELETE', p);
 // تحويل بين شكل البيانات في الذاكرة وشكلها في السحابة
 function toCloud(d){
-  const c = {products:{}, stock:d.stock || {}, sales:{}, users:{}};
+  const c = {products:{}, stock:d.stock || {}, sales:{}, users:{}, branches:{}};
+  (d.branches || DEFAULT_BRANCHES).forEach(b => c.branches[b.key] = b);
   d.products.forEach(p => c.products[p.id] = p);
   (d.sales || []).forEach(x => c.sales['s' + x.id] = x);
   (d.users || []).forEach(u => c.users[u.u] = u);
   return c;
 }
 function fromCloud(c){
-  return {products:Object.values(c.products || {}), stock:c.stock || {}, sales:Object.values(c.sales || {}), users:Object.values(c.users || {})};
+  return {products:Object.values(c.products || {}), stock:c.stock || {}, sales:Object.values(c.sales || {}), users:Object.values(c.users || {}), branches:c.branches ? Object.values(c.branches) : DEFAULT_BRANCHES.map(b => ({...b}))};
 }
 async function loadDB(){
   let c = await fb('GET', '');
@@ -74,10 +84,11 @@ async function loadDB(){
   if (!c || (!c.products && !(c.meta && c.meta.seeded))) { c = toCloud(seedData()); c.meta = {seeded:true}; await fb('PUT', '', c); }
   else if (!c.meta) { c.meta = {seeded:true}; await cloudSet('/meta', c.meta); }
   if (!c.users) { c.users = toCloud({products:[], users:DEFAULT_USERS}).users; await cloudSet('/users', c.users); }
-  return fromCloud(c);
+  if (!c.branches) { c.branches = {}; DEFAULT_BRANCHES.forEach(b => c.branches[b.key] = b); await cloudSet('/branches', c.branches); }
+  const d = fromCloud(c); applyBranches(d.branches); return d;
 }
 function sync(promise){ promise.catch(() => toast('تعذر الحفظ على السحابة - تأكد من الإنترنت', true)); return promise; }
-let db = {products:[], stock:{}, sales:[], users:[]};
+let db = {products:[], stock:{}, sales:[], users:[], branches:[]};
 let session = null;
 try { session = JSON.parse(localStorage.getItem(SESSION_KEY)); } catch(e){}
 let tab = null;                // التبويب الحالي
@@ -118,6 +129,7 @@ function doLogin(){
   const u = document.getElementById('lu').value.trim().toLowerCase(), p = document.getElementById('lp').value;
   const user = db.users.find(x => x.u === u && x.p === p);
   if (user && user.disabled) return toast('هذا الحساب موقوف', true);
+  if (user && !userOk(user)) return toast('هذا الفرع غير مفعّل حالياً', true);
   if (!user) return toast('بيانات الدخول غير صحيحة', true);
   session = user; try { localStorage.setItem(SESSION_KEY, JSON.stringify(user)); } catch(e){}
   tab = null; renderApp();
@@ -255,7 +267,7 @@ function vInventoryBase(){
         </div>`).join('')}</div>
     </div>`).join('')}</div>`;
 }
-function vInventory(){ vInventoryBase(); tfSizes(); }
+function vInventory(){ if (!LOCS.some(l => l.key === ui.loc)) ui.loc = 'main'; vInventoryBase(); tfSizes(); }
 function tfSizes(){
   const p = db.products.find(x => x.id === (document.getElementById('tp') || {}).value), z = document.getElementById('tz');
   if (z) z.innerHTML = p ? p.sizes.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('') : '';
@@ -298,7 +310,8 @@ const setPer = p => { ui.per = p; vReports(); };
 const bar = (v, max, c) => `<div class="h-1.5 rounded bg-[#efe6d6] mt-1"><div class="h-1.5 rounded ${c || 'bg-gold'}" style="width:${Math.max(2, Math.round(v / max * 100))}%"></div></div>`;
 function vReports(){
   const [from, to] = repRange();
-  const all = db.sales.filter(s => s.date >= from && s.date <= to);
+  if (ui.repBranch !== 'all' && !isLive(ui.repBranch)) ui.repBranch = 'all';
+  const all = db.sales.filter(s => s.date >= from && s.date <= to && isLive(s.branch));
   const sumQ = l => l.reduce((a, s) => a + netQty(s), 0), sumT = l => l.reduce((a, s) => a + netTotal(s), 0);
   const totQ = sumQ(all), totT = sumT(all), nInv = all.filter(s => netQty(s) > 0).length;
   const retVal = all.reduce((a, s) => a + (s.cancelled ? s.total : (s.retQty || 0) * (s.total / s.qty)), 0);
@@ -321,7 +334,7 @@ function vReports(){
   }));
   alerts.sort((a, b) => a.n - b.n);
   // المبيعات يوم بيوم (آخر 30 يوم) حسب الفرع
-  const byDay = {}; db.sales.filter(s => ui.repBranch === 'all' || s.branch === ui.repBranch).forEach(s => { const d = byDay[s.date] = byDay[s.date] || {q:0, t:0}; d.q += netQty(s); d.t += netTotal(s); });
+  const byDay = {}; db.sales.filter(s => isLive(s.branch) && (ui.repBranch === 'all' || s.branch === ui.repBranch)).forEach(s => { const d = byDay[s.date] = byDay[s.date] || {q:0, t:0}; d.q += netQty(s); d.t += netTotal(s); });
   const days = Object.keys(byDay).sort().reverse().slice(0, 30), maxD = Math.max(1, ...days.map(d => byDay[d].t));
   const chip = (k, t) => `<button onclick="setPer('${k}')" class="btn text-sm py-1.5 ${ui.per === k ? 'bg-ink text-white' : 'bg-white border'}">${t}</button>`;
   const kpi = (t, v, c) => `<div class="card p-3 text-center"><div class="text-xs text-gray-500">${t}</div><div class="text-xl font-extrabold ${c || 'gold'}">${v}</div></div>`;
@@ -368,7 +381,7 @@ function vReports(){
 }
 // تصدير فواتير الفترة إلى ملف CSV يفتح في Excel
 function exportCSV(){
-  const [from, to] = repRange(), list = db.sales.filter(s => s.date >= from && s.date <= to).sort((a, b) => a.id - b.id);
+  const [from, to] = repRange(), list = db.sales.filter(s => s.date >= from && s.date <= to && isLive(s.branch)).sort((a, b) => a.id - b.id);
   const head = ['التاريخ','الوقت','الفرع','المنتج','الكود','المقاس','الكمية','المرتجع','الحالة','الصافي (ج.م)'];
   const lines = [head].concat(list.map(s => [s.date, s.time || '', locName(s.branch), s.name, s.sku, s.size, s.qty, s.retQty || 0, s.cancelled ? 'ملغاة' : 'مكتملة', Math.round(netTotal(s))]));
   const csv = '\ufeff' + lines.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
@@ -518,6 +531,23 @@ function renderOthers(){
 const PERMS = [{k:'cashier', t:'تسجيل المبيعات (الكاشير)'}, {k:'others', t:'رؤية مخزون الفروع'}];
 function vAccounts(){
   view().innerHTML = `
+  <div class="card p-4 mb-4">
+    <h2 class="font-extrabold text-lg mb-1 gold">🏬 إدارة الفروع</h2>
+    <p class="text-xs text-gray-500 mb-3">الفرع المخفي يختفي من كل التقارير والبحث والتحويلات ولا يستطيع موظفوه الدخول. وعند إظهاره يرجع بكل بياناته.</p>
+    ${db.branches.slice().sort((a, b) => a.o - b.o).map(b => `
+    <div class="flex justify-between items-center py-2 border-b">
+      <div><span class="font-bold">${esc(b.name)}</span> <span class="text-xs ${b.active === false ? 'text-red-600' : 'text-green-700'}">${b.active === false ? '(مخفي)' : '(ظاهر)'}</span></div>
+      <button onclick="brToggle('${b.key}')" class="btn text-sm py-1.5 ${b.active === false ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}">${b.active === false ? 'إظهار' : 'إخفاء'}</button>
+    </div>`).join('')}
+    <div class="mt-3 space-y-2">
+      <input id="bn" class="inp" placeholder="اسم الفرع الجديد (مثال: بنها)">
+      <div class="grid grid-cols-2 gap-2">
+        <input id="bk" class="inp" dir="ltr" placeholder="اسم مستخدم الفرع (إنجليزي)" autocapitalize="none">
+        <input id="bp" class="inp" dir="ltr" placeholder="كلمة المرور">
+      </div>
+      <button onclick="brAdd()" class="btn bg-gold text-white w-full">➕ إضافة فرع جديد</button>
+    </div>
+  </div>
   <div class="card p-4 mb-4 border border-amber-300">
     <h2 class="font-extrabold mb-1">☁️ نقل بيانات هذا الجهاز للسحابة</h2>
     <p class="text-xs text-gray-500 mb-2">لو أدخلت منتجات على هذا الجهاز قبل الربط، اضغط مرة واحدة لرفعها (يستبدل بيانات السحابة).</p>
@@ -556,6 +586,23 @@ function vAccounts(){
     </div>`).join('')}</div>`;
 }
 const getU = n => db.users.find(x => x.u === n);
+function brToggle(k){
+  const b = db.branches.find(x => x.key === k); if (!b) return;
+  if (b.active !== false && !confirm('إخفاء فرع ' + b.name + ' من التقارير والبحث وإيقاف دخول موظفيه؟')) return;
+  b.active = b.active === false;
+  sync(cloudSet('/branches/' + k, b)); applyBranches(db.branches); toast(b.active ? 'تم إظهار الفرع' : 'تم إخفاء الفرع'); vAccounts();
+}
+function brAdd(){
+  const name = bn.value.trim(), key = bk.value.trim().toLowerCase(), pw = bp.value.trim();
+  if (!name) return toast('اكتب اسم الفرع', true);
+  if (!/^[a-z0-9_]+$/.test(key) || key === 'main' || key === 'admin') return toast('اسم المستخدم: حروف إنجليزية وأرقام فقط', true);
+  if (pw.length < 4) return toast('كلمة المرور قصيرة (4 أحرف على الأقل)', true);
+  if (db.branches.some(b => b.key === key) || getU(key)) return toast('اسم المستخدم مستخدم من قبل', true);
+  const b = {key, name, active:true, o:Math.max(-1, ...db.branches.map(x => x.o)) + 1};
+  const u = {u:key, p:pw, role:'branch', branch:key, name:'فرع ' + name, tabs:['cashier','others']};
+  db.branches.push(b); db.users.push(u); applyBranches(db.branches);
+  sync(Promise.all([cloudSet('/branches/' + key, b), cloudSet('/users/' + key, u)])); toast('تمت إضافة الفرع وحسابه'); vAccounts();
+}
 async function migrateLocal(){
   let d = null; try { d = JSON.parse(localStorage.getItem(DB_KEY)); } catch(e){}
   if (!d || !d.products || !d.products.length) return toast('لا توجد بيانات قديمة على هذا الجهاز', true);
@@ -564,7 +611,7 @@ async function migrateLocal(){
     const c = toCloud(d);
     if (!Object.keys(c.users).length) c.users = toCloud({products:[], users:DEFAULT_USERS}).users;
     c.meta = {seeded:true}; await fb('PUT', '', c); db = fromCloud(c);
-    session = db.users.find(u => u.u === session.u) || session;
+    applyBranches(db.branches); session = db.users.find(u => u.u === session.u) || session;
     toast('تم رفع البيانات للسحابة'); vAccounts();
   } catch(e){ toast('فشل الرفع', true); }
 }
@@ -600,7 +647,7 @@ async function refreshData(manual){
     const nd = await loadDB();
     if (JSON.stringify(nd) === JSON.stringify(db)) { if (manual === true) toast('البيانات محدثة'); return; }
     db = nd;
-    if (session) { const l = db.users.find(u => u.u === session.u && !u.disabled); if (!l) return logout(); session = l; }
+    if (session) { const l = db.users.find(u => u.u === session.u && userOk(u)); if (!l) return logout(); session = l; }
     const a = document.activeElement, typing = a && /INPUT|SELECT|TEXTAREA/.test(a.tagName);
     if (session && (manual === true || (!typing && !['cashier','accounts','products'].includes(tab)))) renderApp();
   } catch(e){ if (manual === true) toast('تعذر التحديث', true); }
@@ -611,7 +658,7 @@ async function boot(){
     document.getElementById('app').innerHTML = '<div class="p-8 text-center"><div class="text-red-600 font-bold mb-3">تعذر الاتصال بقاعدة البيانات</div><button onclick="boot()" class="btn bg-ink text-white">إعادة المحاولة</button></div>';
     return;
   }
-  const live = session && db.users.find(u => u.u === session.u && !u.disabled);
+  const live = session && db.users.find(u => u.u === session.u && userOk(u));
   if (live) { session = live; renderApp(); } else renderLogin();
   if (!boot.t) boot.t = setInterval(refreshData, 15000);   // تحديث تلقائي كل 15 ثانية
 }
